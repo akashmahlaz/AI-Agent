@@ -1,4 +1,4 @@
-# Operonx
+# Operonx [temprary name ]
 
 Rust backend for our software , name of software not choosen still. The Next.js app remains the frontend while backend responsibilities move here.
 

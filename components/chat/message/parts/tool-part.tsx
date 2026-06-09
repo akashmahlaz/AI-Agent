@@ -21,6 +21,11 @@ import {
   Workflow,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { JsonViewer } from "@/components/chat/message/parts/json-viewer";
+import {
+  ChartBlock,
+  detectChartData,
+} from "@/components/chat/message/parts/chart-block";
 import type { ToolCallPart } from "@/components/chat/message/types";
 
 // ---------------------------------------------------------------------------
@@ -74,10 +79,17 @@ const TOOL_ICONS: Record<string, typeof FileText> = {
   github_save_token: GitBranch,
 };
 
-const ACTIVE_TOOL_STATES = ["calling", "input-streaming", "input-available", "executing"] as const;
+const ACTIVE_TOOL_STATES = [
+  "calling",
+  "input-streaming",
+  "input-available",
+  "executing",
+] as const;
 
 function isActiveToolState(state: string) {
-  return ACTIVE_TOOL_STATES.includes(state as (typeof ACTIVE_TOOL_STATES)[number]);
+  return ACTIVE_TOOL_STATES.includes(
+    state as (typeof ACTIVE_TOOL_STATES)[number],
+  );
 }
 
 function ActivePulseDot() {
@@ -115,10 +127,14 @@ function formatRepo(args: Record<string, unknown>): string | undefined {
   return asString(args.repository);
 }
 
-export function describeTool(toolName: string, args?: Record<string, unknown>): string {
+export function describeTool(
+  toolName: string,
+  args?: Record<string, unknown>,
+): string {
   const a = args ?? {};
   const path = asString(a.path) ?? asString(a.filePath) ?? asString(a.filename);
-  const startL = asNumber(a.start_line) ?? asNumber(a.startLine) ?? asNumber(a.start);
+  const startL =
+    asNumber(a.start_line) ?? asNumber(a.startLine) ?? asNumber(a.start);
   const endL = asNumber(a.end_line) ?? asNumber(a.endLine) ?? asNumber(a.end);
   const query = asString(a.query) ?? asString(a.search) ?? asString(a.q);
   const cmd = asString(a.command) ?? asString(a.cmd);
@@ -154,9 +170,13 @@ export function describeTool(toolName: string, args?: Record<string, unknown>): 
 
     case "tavily_search":
     case "web_search":
-      return query ? `Searched the web for ${quote(query)}` : "Searched the web";
+      return query
+        ? `Searched the web for ${quote(query)}`
+        : "Searched the web";
     case "web_request":
-      return asString(a.url) ? `Fetched ${asString(a.url)}` : "Made web request";
+      return asString(a.url)
+        ? `Fetched ${asString(a.url)}`
+        : "Made web request";
 
     case "memory_search":
       return query ? `Searched memory for ${quote(query)}` : "Searched memory";
@@ -233,7 +253,10 @@ export function getToolLabel(toolName: string, args?: Record<string, unknown>) {
   return describeTool(toolName, args);
 }
 
-function isRawToolMessage(message: string | undefined, toolName: string): boolean {
+function isRawToolMessage(
+  message: string | undefined,
+  toolName: string,
+): boolean {
   if (!message) return false;
   return message.includes(toolName) || message.includes(`\`${toolName}\``);
 }
@@ -253,10 +276,14 @@ function ToolIcon({
   // (handled by ToolCallItem). Render the static icon for every state so the
   // row's left position never shifts on state transitions.
   if (error) {
-    return <AlertCircle className={cn("size-3.5 text-destructive", className)} />;
+    return (
+      <AlertCircle className={cn("size-3.5 text-destructive", className)} />
+    );
   }
   const Icon = TOOL_ICONS[toolName] ?? FileText;
-  return <Icon className={cn("size-3.5 text-muted-foreground/70", className)} />;
+  return (
+    <Icon className={cn("size-3.5 text-muted-foreground/70", className)} />
+  );
 }
 
 function formatJson(v: unknown): string {
@@ -273,15 +300,21 @@ export function ToolPart({ tool }: { tool: ToolCallPart }) {
   const isPending = isActiveToolState(tool.state);
 
   const fallbackLabel = describeTool(tool.toolName, tool.args);
-  const invocationMessage = isRawToolMessage(tool.invocationMessage, tool.toolName)
+  const invocationMessage = isRawToolMessage(
+    tool.invocationMessage,
+    tool.toolName,
+  )
     ? undefined
     : tool.invocationMessage;
-  const pastTenseMessage = isRawToolMessage(tool.pastTenseMessage, tool.toolName)
+  const pastTenseMessage = isRawToolMessage(
+    tool.pastTenseMessage,
+    tool.toolName,
+  )
     ? undefined
     : tool.pastTenseMessage;
   const label = isPending
-    ? invocationMessage ?? fallbackLabel
-    : pastTenseMessage ?? invocationMessage ?? fallbackLabel;
+    ? (invocationMessage ?? fallbackLabel)
+    : (pastTenseMessage ?? invocationMessage ?? fallbackLabel);
 
   // Pull a short mono "target" out of args (path / repo / query / cmd / url)
   const a = tool.args ?? {};
@@ -351,7 +384,9 @@ export function ToolPart({ tool }: { tool: ToolCallPart }) {
       <div
         className={cn(
           "grid transition-[grid-template-rows,opacity] duration-200 ease-out",
-          open && hasDetails ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0",
+          open && hasDetails
+            ? "grid-rows-[1fr] opacity-100"
+            : "grid-rows-[0fr] opacity-0",
         )}
       >
         <div className="overflow-hidden">
@@ -371,11 +406,36 @@ export function ToolPart({ tool }: { tool: ToolCallPart }) {
                 <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground/60">
                   Output
                 </div>
-                <pre className="mt-1 max-h-72 overflow-auto rounded-md border border-border/50 bg-muted/40 px-2.5 py-1.5 font-mono text-[11.5px] leading-relaxed text-muted-foreground">
-                  {typeof tool.result === "string"
-                    ? tool.result
-                    : formatJson(tool.result)}
-                </pre>
+                {typeof tool.result === "string" ? (
+                  <pre className="mt-1 max-h-72 overflow-auto rounded-md border border-border/50 bg-muted/40 px-2.5 py-1.5 font-mono text-[11.5px] leading-relaxed text-muted-foreground">
+                    {tool.result}
+                  </pre>
+                ) : (
+                  (() => {
+                    const chart = detectChartData(tool.result);
+                    if (chart) {
+                      return (
+                        <>
+                          <ChartBlock
+                            data={chart.data}
+                            type={chart.type}
+                            className="mt-1"
+                          />
+                          <JsonViewer
+                            data={tool.result}
+                            className="mt-1 max-h-48 overflow-auto"
+                          />
+                        </>
+                      );
+                    }
+                    return (
+                      <JsonViewer
+                        data={tool.result}
+                        className="mt-1 max-h-72 overflow-auto"
+                      />
+                    );
+                  })()
+                )}
               </div>
             )}
             {error && tool.errorText && (
@@ -412,7 +472,9 @@ export function ToolPartList({ tools }: { tools: ToolCallPart[] }) {
           className="mb-0.5 flex items-center gap-1 text-[11.5px] text-muted-foreground/70 transition-colors hover:text-foreground"
         >
           <ChevronRight className="size-3" />
-          <span>Show {hidden} earlier {hidden === 1 ? "step" : "steps"}</span>
+          <span>
+            Show {hidden} earlier {hidden === 1 ? "step" : "steps"}
+          </span>
         </button>
       )}
 
@@ -429,10 +491,19 @@ export function ToolPartList({ tools }: { tools: ToolCallPart[] }) {
               className={cn(
                 "absolute -left-3 top-0 bottom-0 w-px bg-muted-foreground/55 dark:bg-border/85",
                 only && !active && "hidden",
-                only && active && "mask-[linear-gradient(to_bottom,black_0_5px,transparent_5px_20px,black_20px_100%)]",
-                !only && first && "mask-[linear-gradient(to_bottom,transparent_0_20px,black_20px_100%)]",
-                !only && last && "mask-[linear-gradient(to_bottom,black_0_5px,transparent_5px_100%)]",
-                !only && !first && !last && "mask-[linear-gradient(to_bottom,black_0_5px,transparent_5px_20px,black_20px_100%)]",
+                only &&
+                  active &&
+                  "mask-[linear-gradient(to_bottom,black_0_5px,transparent_5px_20px,black_20px_100%)]",
+                !only &&
+                  first &&
+                  "mask-[linear-gradient(to_bottom,transparent_0_20px,black_20px_100%)]",
+                !only &&
+                  last &&
+                  "mask-[linear-gradient(to_bottom,black_0_5px,transparent_5px_100%)]",
+                !only &&
+                  !first &&
+                  !last &&
+                  "mask-[linear-gradient(to_bottom,black_0_5px,transparent_5px_20px,black_20px_100%)]",
               )}
             />
             <span className="absolute -left-4 top-3 flex size-2 items-center justify-center bg-background">

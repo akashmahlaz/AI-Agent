@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback, useMemo, Suspense } from "react";
+import { useState, useRef, useEffect, useCallback, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   Check,
@@ -18,6 +18,11 @@ import {
   Power,
   X,
   File as FileIcon,
+  FileText,
+  FileSpreadsheet,
+  FileCode,
+  FileArchive,
+  FileType,
   Loader2,
   Phone,
   Users,
@@ -31,10 +36,19 @@ import {
   GraduationCap,
   Coffee,
   Mail,
+  Upload,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { MagicCard } from "@/components/ui/magic-card";
 import { BorderBeam } from "@/components/ui/border-beam";
 import { BlurFade } from "@/components/ui/blur-fade";
@@ -45,6 +59,7 @@ import AI_Input_Search, {
   type ReasoningLevel,
 } from "@/components/kokonutui/ai-input-search";
 import { StreamingChatMessageList } from "@/components/chat/message/streaming-message";
+import { ChatErrorBoundary } from "@/components/chat/chat-error-boundary";
 import { useStreamEvents } from "@/hooks/use-stream-events";
 import type { StreamingMessage } from "@/hooks/use-stream-events/types";
 import { hydrateMessageParts } from "@/lib/chat/hydrate-message-parts";
@@ -64,7 +79,13 @@ interface ConversationSummary {
 
 const CHANNEL_META: Record<
   string,
-  { label: string; icon: typeof Globe; dotColor: string; bgColor: string; description: string }
+  {
+    label: string;
+    icon: typeof Globe;
+    dotColor: string;
+    bgColor: string;
+    description: string;
+  }
 > = {
   whatsapp: {
     label: "WhatsApp",
@@ -98,7 +119,11 @@ interface AttachedFile {
 }
 
 interface ProviderApiState {
-  profiles?: Array<{ provider: string; models?: string[]; defaultModel?: string }>;
+  profiles?: Array<{
+    provider: string;
+    models?: string[];
+    defaultModel?: string;
+  }>;
   defaultModel?: string;
 }
 
@@ -113,7 +138,56 @@ function formatTimeAgo(dateStr: string): string {
   if (hours < 24) return `${hours}h`;
   const days = Math.floor(hours / 24);
   if (days < 7) return `${days}d`;
-  return new Date(dateStr).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return new Date(dateStr).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+  });
+}
+
+function FileTypeIcon({
+  filename,
+  className,
+}: {
+  filename: string;
+  className?: string;
+}) {
+  const ext = filename.split(".").pop()?.toLowerCase() ?? "";
+
+  const PDF_EXTS = ["pdf"];
+  const SPREADSHEET_EXTS = ["csv", "xls", "xlsx", "tsv", "ods"];
+  const CODE_EXTS = [
+    "js",
+    "ts",
+    "tsx",
+    "jsx",
+    "py",
+    "rs",
+    "go",
+    "java",
+    "c",
+    "cpp",
+    "html",
+    "css",
+    "json",
+    "md",
+    "yaml",
+    "yml",
+    "toml",
+  ];
+  const ARCHIVE_EXTS = ["zip", "tar", "gz", "rar", "7z"];
+  const DOC_EXTS = ["doc", "docx", "txt", "rtf", "odt"];
+
+  if (PDF_EXTS.includes(ext))
+    return <FileText className={cn(className, "text-red-500")} />;
+  if (SPREADSHEET_EXTS.includes(ext))
+    return <FileSpreadsheet className={cn(className, "text-green-600")} />;
+  if (CODE_EXTS.includes(ext))
+    return <FileCode className={cn(className, "text-blue-500")} />;
+  if (ARCHIVE_EXTS.includes(ext))
+    return <FileArchive className={cn(className, "text-amber-600")} />;
+  if (DOC_EXTS.includes(ext))
+    return <FileType className={cn(className, "text-indigo-500")} />;
+  return <FileIcon className={className} />;
 }
 
 function ChatPage() {
@@ -121,7 +195,8 @@ function ChatPage() {
   const searchParams = useSearchParams();
   const urlConvId = searchParams.get("id") || undefined;
   const { user } = useOperonSession();
-  const userName = user?.name?.split(" ")[0] ?? user?.display_name?.split(" ")[0] ?? "there";
+  const userName =
+    user?.name?.split(" ")[0] ?? user?.display_name?.split(" ")[0] ?? "there";
 
   function getGreeting() {
     const h = new Date().getHours();
@@ -131,7 +206,6 @@ function ChatPage() {
   }
 
   const convIdRef = useRef<string | null>(null);
-
 
   const {
     messages: chatMessages,
@@ -143,6 +217,10 @@ function ChatPage() {
   } = useStreamEvents({
     api: "/agent/runs",
     conversationId: convIdRef.current ?? undefined,
+    onFinished: () => {
+      // Refresh sidebar after stream ends — picks up auto-generated title
+      loadConversations();
+    },
     onResponse: (res) => {
       const cid = res.headers.get("X-Conversation-Id");
       if (cid) {
@@ -185,8 +263,9 @@ function ChatPage() {
     allowedNumbers: string;
   }>({ numberType: null, accessMode: null, allowedNumbers: "" });
   const [channelPanelOpen, setChannelPanelOpen] = useState(false);
-  const [channelPanelView, setChannelPanelView] =
-    useState<"list" | "whatsapp-connect" | "whatsapp-settings" | "telegram-connect">("list");
+  const [channelPanelView, setChannelPanelView] = useState<
+    "list" | "whatsapp-connect" | "whatsapp-settings" | "telegram-connect"
+  >("list");
   const [waQrSession, setWaQrSession] = useState<{
     sessionId: string;
     qrDataUrl: string | null;
@@ -194,9 +273,14 @@ function ChatPage() {
   } | null>(null);
   const [waConnecting, setWaConnecting] = useState(false);
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
-  const [selectedModel, setSelectedModel] = useState<string>("openai/gpt-4o-mini");
+  const [selectedModel, setSelectedModel] =
+    useState<string>("openai/gpt-4o-mini");
   const [modelOptions, setModelOptions] = useState<PromptModelOption[]>([
-    { value: "openai/gpt-4o-mini", label: "gpt-4o-mini", providerLabel: "OpenAI" },
+    {
+      value: "openai/gpt-4o-mini",
+      label: "gpt-4o-mini",
+      providerLabel: "OpenAI",
+    },
   ]);
   const [reasoningLevel, setReasoningLevel] = useState<ReasoningLevel>("auto");
 
@@ -217,16 +301,20 @@ function ChatPage() {
         const data = (await response.json()) as ProviderApiState;
         if (cancelled) return;
         const connected = (data.profiles ?? []).flatMap((profile) =>
-          (profile.models ?? []).map((model) => ({
-            value: `${profile.provider}/${model}`,
-            label: model,
-            providerLabel: providerLabel(profile.provider),
-          } satisfies PromptModelOption)),
+          (profile.models ?? []).map(
+            (model) =>
+              ({
+                value: `${profile.provider}/${model}`,
+                label: model,
+                providerLabel: providerLabel(profile.provider),
+              }) satisfies PromptModelOption,
+          ),
         );
         if (connected.length > 0) {
           setModelOptions(connected);
           setSelectedModel(
-            data.defaultModel && connected.some((item) => item.value === data.defaultModel)
+            data.defaultModel &&
+              connected.some((item) => item.value === data.defaultModel)
               ? data.defaultModel
               : connected[0].value,
           );
@@ -263,8 +351,18 @@ function ChatPage() {
     }
     // Models that emit reasoning natively (reasoning_content / <think>)
     if (providerId === "deepseek" || providerId === "groq") return true;
-    if (modelId.includes("r1") || modelId.includes("reasoner") || modelId.includes("thinking")) return true;
-    if (providerId === "minimax" || providerId === "qwen" || providerId === "alibaba") return true;
+    if (
+      modelId.includes("r1") ||
+      modelId.includes("reasoner") ||
+      modelId.includes("thinking")
+    )
+      return true;
+    if (
+      providerId === "minimax" ||
+      providerId === "qwen" ||
+      providerId === "alibaba"
+    )
+      return true;
     return false;
   }
 
@@ -277,7 +375,10 @@ function ChatPage() {
   const scrollToBottom = useCallback((instant = false) => {
     const el = messagesContainerRef.current;
     if (!el) return;
-    el.scrollTo({ top: el.scrollHeight, behavior: instant ? "instant" : "smooth" });
+    el.scrollTo({
+      top: el.scrollHeight,
+      behavior: instant ? "instant" : "smooth",
+    });
   }, []);
 
   const checkIfNearBottom = useCallback(() => {
@@ -299,7 +400,7 @@ function ChatPage() {
   }, [checkIfNearBottom]);
 
   useEffect(() => {
-    if (isNearBottom) scrollToBottom();
+    if (isNearBottom) scrollToBottom(true);
   }, [messages, isNearBottom, scrollToBottom]);
 
   // Load conversations + channel status
@@ -321,7 +422,7 @@ function ChatPage() {
         setActiveChannel("web");
       });
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [urlConvId]);
 
   async function loadConversations() {
@@ -339,8 +440,12 @@ function ChatPage() {
   async function loadChannelStatus() {
     try {
       const [waRes, tgRes] = await Promise.all([
-        operonFetch("/integrations/whatsapp/status").then((r) => (r.ok ? r.json() : null)).catch(() => null),
-        operonFetch("/integrations/telegram/status").then((r) => (r.ok ? r.json() : null)).catch(() => null),
+        operonFetch("/integrations/whatsapp/status")
+          .then((r) => (r.ok ? r.json() : null))
+          .catch(() => null),
+        operonFetch("/integrations/telegram/status")
+          .then((r) => (r.ok ? r.json() : null))
+          .catch(() => null),
       ]);
       setChannelStatus({
         web: true,
@@ -359,8 +464,15 @@ function ChatPage() {
       const data = await res.json();
       setWaSettings({
         numberType: data.phoneType || null,
-        accessMode: data.dmPolicy === "allowlist" ? "specific" : data.dmPolicy === "open" ? "all" : null,
-        allowedNumbers: (data.allowFrom || []).filter((n: string) => n !== "*").join(", "),
+        accessMode:
+          data.dmPolicy === "allowlist"
+            ? "specific"
+            : data.dmPolicy === "open"
+              ? "all"
+              : null,
+        allowedNumbers: (data.allowFrom || [])
+          .filter((n: string) => n !== "*")
+          .join(", "),
       });
     } catch {
       /* ignore */
@@ -402,21 +514,40 @@ function ChatPage() {
 
   async function loadConversation(id: string) {
     try {
-      const res = await operonFetch(`/agent/conversations/${encodeURIComponent(id)}`);
+      const res = await operonFetch(
+        `/agent/conversations/${encodeURIComponent(id)}`,
+      );
       if (!res.ok) throw new Error("Failed");
       const data = await res.json();
       setConversationId(data._id);
       convIdRef.current = data._id;
       setActiveChannel(data.channel || "web");
       const loaded: StreamingMessage[] = (data.messages || [])
-        .filter((m: { role: string; content?: string }) => m.role !== "system" || m.content)
-        .map((m: { _id?: string; role: string; content: string; parts?: unknown[] }, i: number) => ({
-          id: m._id ?? String(i),
-          role: m.role as "user" | "assistant",
-          orderedParts: hydrateMessageParts(m._id ?? String(i), m.parts, m.content || ""),
-          isComplete: true,
-          isStreaming: false,
-        }));
+        .filter(
+          (m: { role: string; content?: string }) =>
+            m.role !== "system" || m.content,
+        )
+        .map(
+          (
+            m: {
+              _id?: string;
+              role: string;
+              content: string;
+              parts?: unknown[];
+            },
+            i: number,
+          ) => ({
+            id: m._id ?? String(i),
+            role: m.role as "user" | "assistant",
+            orderedParts: hydrateMessageParts(
+              m._id ?? String(i),
+              m.parts,
+              m.content || "",
+            ),
+            isComplete: true,
+            isStreaming: false,
+          }),
+        );
       setChatMessages(loaded);
       requestAnimationFrame(() => scrollToBottom(true));
     } catch {
@@ -448,7 +579,9 @@ function ChatPage() {
   async function deleteConversation(id: string, e: React.MouseEvent) {
     e.stopPropagation();
     try {
-      await operonFetch(`/agent/conversations/${encodeURIComponent(id)}`, { method: "DELETE" });
+      await operonFetch(`/agent/conversations/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+      });
       if (conversationId === id) router.push("/dashboard/chat");
       loadConversations();
     } catch {
@@ -464,7 +597,7 @@ function ChatPage() {
     setInput("");
   }
 
-    function handleFileClick() {
+  function handleFileClick() {
     fileInputRef.current?.click();
   }
 
@@ -476,7 +609,9 @@ function ChatPage() {
         toast.error(`${file.name} is too large (max 10 MB)`);
         continue;
       }
-      const preview = file.type.startsWith("image/") ? URL.createObjectURL(file) : undefined;
+      const preview = file.type.startsWith("image/")
+        ? URL.createObjectURL(file)
+        : undefined;
       const entry: AttachedFile = { file, preview, uploading: true };
       setAttachedFiles((prev) => [...prev, entry]);
       const formData = new FormData();
@@ -484,19 +619,27 @@ function ChatPage() {
       operonFetch("/uploads", { method: "POST", body: formData })
         .then(async (res) => {
           if (!res.ok) {
-            const err = await res.json().catch(() => ({ error: "Upload failed" }));
+            const err = await res
+              .json()
+              .catch(() => ({ error: "Upload failed" }));
             throw new Error(err.error || "Upload failed");
           }
           const data = await res.json();
           setAttachedFiles((prev) =>
             prev.map((f) =>
-              f.file === file ? { ...f, uploading: false, url: data.publicUrl || data.url } : f,
+              f.file === file
+                ? { ...f, uploading: false, url: data.publicUrl || data.url }
+                : f,
             ),
           );
         })
         .catch((err) => {
           setAttachedFiles((prev) =>
-            prev.map((f) => (f.file === file ? { ...f, uploading: false, error: err.message } : f)),
+            prev.map((f) =>
+              f.file === file
+                ? { ...f, uploading: false, error: err.message }
+                : f,
+            ),
           );
           toast.error(`Failed to upload ${file.name}`);
         });
@@ -510,6 +653,70 @@ function ChatPage() {
       if (entry?.preview) URL.revokeObjectURL(entry.preview);
       return prev.filter((f) => f.file !== file);
     });
+  }
+
+  // Drag-and-drop file upload
+  const [dragOver, setDragOver] = useState(false);
+
+  function handleDragOver(e: React.DragEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOver(true);
+  }
+
+  function handleDragLeave(e: React.DragEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOver(false);
+  }
+
+  function handleDrop(e: React.DragEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOver(false);
+    const files = Array.from(e.dataTransfer.files);
+    if (!files.length) return;
+    // Reuse the same upload logic from handleFileChange
+    for (const file of files) {
+      if (file.size > 10 * 1024 * 1024) {
+        toast.error(`${file.name} is too large (max 10 MB)`);
+        continue;
+      }
+      const preview = file.type.startsWith("image/")
+        ? URL.createObjectURL(file)
+        : undefined;
+      const entry: AttachedFile = { file, preview, uploading: true };
+      setAttachedFiles((prev) => [...prev, entry]);
+      const formData = new FormData();
+      formData.append("file", file);
+      operonFetch("/uploads", { method: "POST", body: formData })
+        .then(async (res) => {
+          if (!res.ok) {
+            const err = await res
+              .json()
+              .catch(() => ({ error: "Upload failed" }));
+            throw new Error(err.error || "Upload failed");
+          }
+          const data = await res.json();
+          setAttachedFiles((prev) =>
+            prev.map((f) =>
+              f.file === file
+                ? { ...f, uploading: false, url: data.publicUrl || data.url }
+                : f,
+            ),
+          );
+        })
+        .catch((err) => {
+          setAttachedFiles((prev) =>
+            prev.map((f) =>
+              f.file === file
+                ? { ...f, uploading: false, error: err.message }
+                : f,
+            ),
+          );
+          toast.error(`Failed to upload ${file.name}`);
+        });
+    }
   }
 
   async function startWhatsAppConnect() {
@@ -545,68 +752,103 @@ function ChatPage() {
     }
   }
 
-  const handleSend = useCallback(async (overrideContent?: string) => {
-    if (isLoading) return;
-    let content = (overrideContent ?? input).trim();
-    if (!content && attachedFiles.length === 0) return;
+  const handleSend = useCallback(
+    async (overrideContent?: string) => {
+      if (isLoading) return;
+      // Guard: don't send while files are still uploading
+      const stillUploading = attachedFiles.some((f) => f.uploading);
+      if (stillUploading) {
+        toast.error("Please wait for file uploads to complete.");
+        return;
+      }
+      let content = (overrideContent ?? input).trim();
+      if (!content && attachedFiles.length === 0) return;
 
-    // Copilot-style built-in slash commands handled client-side.
-    if (content === "/new") {
+      // Copilot-style built-in slash commands handled client-side.
+      if (content === "/new") {
+        setInput("");
+        setAttachedFiles([]);
+        setChatMessages([]);
+        setConversationId(null);
+        convIdRef.current = null;
+        router.push("/dashboard/chat");
+        return;
+      }
+      if (content === "/clear") {
+        setInput("");
+        setAttachedFiles([]);
+        setChatMessages([]);
+        return;
+      }
+
+      if (!selectedModel) {
+        toast.error(
+          "No API-backed model is available. Refresh or connect a provider in Settings.",
+        );
+        return;
+      }
+
+      const uploadedFiles = attachedFiles.filter((f) => f.url);
+      // Build structured attachments for vision model support
+      const attachments = uploadedFiles.map((f) => ({
+        url: f.url!,
+        mimeType: f.file.type || "application/octet-stream",
+        name: f.file.name,
+      }));
+      // For non-image files, still include as text links for context
+      const nonImageFiles = uploadedFiles.filter(
+        (f) => !f.file.type.startsWith("image/"),
+      );
+      if (nonImageFiles.length > 0) {
+        const fileSection = nonImageFiles
+          .map((f) => `[File: ${f.file.name}](${f.url})`)
+          .join("\n");
+        content = content ? `${content}\n\n${fileSection}` : fileSection;
+      }
+
       setInput("");
+      // Revoke blob URLs to prevent memory leak
+      for (const af of attachedFiles) {
+        if (af.preview) URL.revokeObjectURL(af.preview);
+      }
       setAttachedFiles([]);
-      setChatMessages([]);
-      setConversationId(null);
-      convIdRef.current = null;
-      router.push("/dashboard/chat");
-      return;
-    }
-    if (content === "/clear") {
-      setInput("");
-      setAttachedFiles([]);
-      setChatMessages([]);
-      return;
-    }
+      setIsNearBottom(true);
+      setShowScrollBtn(false);
 
-    if (!selectedModel) {
-      toast.error("No API-backed model is available. Refresh or connect a provider in Settings.");
-      return;
-    }
+      try {
+        let activeConvId = conversationId;
+        if (!activeConvId) activeConvId = await createConversation();
+        convIdRef.current = activeConvId;
 
-    const uploadedFiles = attachedFiles.filter((f) => f.url);
-    if (uploadedFiles.length > 0) {
-      const fileSection = uploadedFiles
-        .map((f) => `[${f.file.type.startsWith("image/") ? "Image" : "File"}: ${f.file.name}](${f.url})`)
-        .join("\n");
-      content = content ? `${content}\n\n${fileSection}` : fileSection;
-    }
+        // Build options object matching useStreamEvents signature
+        const msgOpts = {
+          conversationId: activeConvId,
+          modelSpec: selectedModel,
+          reasoningLevel,
+          channel: activeChannel,
+          attachments: attachments.length > 0 ? attachments : undefined,
+        };
+        await sendMessage(content, msgOpts);
+        loadConversations();
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : "Failed to connect";
+        toast.error(message);
+      }
+    },
+    [
+      input,
+      isLoading,
+      conversationId,
+      attachedFiles,
+      sendMessage,
+      selectedModel,
+      reasoningLevel,
+      activeChannel,
+    ],
+  );
 
-    setInput("");
-    setAttachedFiles([]);
-    setIsNearBottom(true);
-    setShowScrollBtn(false);
-
-    try {
-      let activeConvId = conversationId;
-      if (!activeConvId) activeConvId = await createConversation();
-      convIdRef.current = activeConvId;
-
-      // Build options object matching useStreamEvents signature
-      const msgOpts = {
-        conversationId: activeConvId,
-        modelSpec: selectedModel,
-        reasoningLevel,
-        channel: activeChannel,
-      };
-      await sendMessage(content, msgOpts);
-      loadConversations();
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Failed to connect";
-      toast.error(message);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [input, isLoading, conversationId, attachedFiles, sendMessage, selectedModel, reasoningLevel]);
-
-    const isChannelConversation = activeChannel !== "web";
+  const isChannelConversation = activeChannel !== "web";
 
   const filteredConversations = searchQuery
     ? conversations.filter(
@@ -634,7 +876,13 @@ function ChatPage() {
     {} as Record<string, typeof filteredConversations>,
   );
 
-  const groupOrder = ["Today", "Yesterday", "Previous 7 Days", "Previous 30 Days", "Older"];
+  const groupOrder = [
+    "Today",
+    "Yesterday",
+    "Previous 7 Days",
+    "Previous 30 Days",
+    "Older",
+  ];
 
   const primaryMeta = CHANNEL_META[primaryChannel] || CHANNEL_META.whatsapp;
   const PrimaryIcon = primaryMeta.icon;
@@ -694,13 +942,18 @@ function ChatPage() {
                 {searchQuery ? "No matching chats" : "No chats yet"}
               </p>
               {!searchQuery && (
-                <p className="text-[11px] text-muted-foreground/60">Start a new conversation above</p>
+                <p className="text-[11px] text-muted-foreground/60">
+                  Start a new conversation above
+                </p>
               )}
             </div>
           ) : (
             <div className="space-y-3 pt-1.5">
               {groupOrder.map((group) => {
-                if (!groupedConversations[group] || groupedConversations[group].length === 0)
+                if (
+                  !groupedConversations[group] ||
+                  groupedConversations[group].length === 0
+                )
                   return null;
                 return (
                   <div key={group}>
@@ -713,7 +966,9 @@ function ChatPage() {
                         return (
                           <button
                             key={c._id}
-                            onClick={() => router.push(`/dashboard/chat?id=${c._id}`)}
+                            onClick={() =>
+                              router.push(`/dashboard/chat?id=${c._id}`)
+                            }
                             className={cn(
                               "group relative w-full rounded-lg px-2.5 py-2 text-left transition-all",
                               isActive
@@ -724,10 +979,14 @@ function ChatPage() {
                             <div className="flex min-w-0 items-start gap-2">
                               <div className="min-w-0 flex-1">
                                 <div className="flex items-center justify-between gap-1">
-                                  <span className={cn(
-                                    "truncate text-[12.5px]",
-                                    isActive ? "font-semibold text-foreground" : "font-medium"
-                                  )}>
+                                  <span
+                                    className={cn(
+                                      "truncate text-[12.5px]",
+                                      isActive
+                                        ? "font-semibold text-foreground"
+                                        : "font-medium",
+                                    )}
+                                  >
                                     {c.title || "Untitled"}
                                   </span>
                                   <span className="shrink-0 text-[10px] text-muted-foreground/60">
@@ -893,8 +1152,12 @@ function ChatPage() {
                               </div>
                               {connected && !isWeb ? (
                                 <div className="flex flex-col items-end gap-0.5">
-                                  <span className="text-[10px] font-bold text-emerald-600">Live</span>
-                                  <span className="text-[9px] text-muted-foreground">Connected</span>
+                                  <span className="text-[10px] font-bold text-emerald-600">
+                                    Live
+                                  </span>
+                                  <span className="text-[9px] text-muted-foreground">
+                                    Connected
+                                  </span>
                                 </div>
                               ) : isWeb ? (
                                 <Wifi className="size-4 text-blue-500/70" />
@@ -921,8 +1184,10 @@ function ChatPage() {
 
                     <div className="flex items-center justify-between border-t border-border px-4 py-2.5">
                       <p className="text-[10px] text-muted-foreground">
-                        <span className="font-semibold text-foreground">{connectedCount}</span> of{" "}
-                        {Object.keys(CHANNEL_META).length} active
+                        <span className="font-semibold text-foreground">
+                          {connectedCount}
+                        </span>{" "}
+                        of {Object.keys(CHANNEL_META).length} active
                       </p>
                       <button
                         onClick={() => {
@@ -950,7 +1215,9 @@ function ChatPage() {
                         <h3 className="font-heading text-[15px] font-bold tracking-tight text-foreground">
                           Connect WhatsApp
                         </h3>
-                        <p className="text-[11px] text-muted-foreground">Link your WhatsApp account</p>
+                        <p className="text-[11px] text-muted-foreground">
+                          Link your WhatsApp account
+                        </p>
                       </div>
                     </div>
                     <div className="px-4 pb-4">
@@ -959,8 +1226,17 @@ function ChatPage() {
                           <div className="flex flex-col items-center gap-4">
                             <div className="relative overflow-hidden rounded-2xl border border-border bg-white p-4 shadow-sm">
                               {/* eslint-disable-next-line @next/next/no-img-element */}
-                              <img src={waQrSession.qrDataUrl} alt="WhatsApp QR" className="size-52" />
-                              <BorderBeam size={80} duration={4} colorFrom="#25D366" colorTo="#075E54" />
+                              <img
+                                src={waQrSession.qrDataUrl}
+                                alt="WhatsApp QR"
+                                className="size-52"
+                              />
+                              <BorderBeam
+                                size={80}
+                                duration={4}
+                                colorFrom="#25D366"
+                                colorTo="#075E54"
+                              />
                             </div>
                             <p className="text-[13px] font-semibold text-foreground">
                               Scan with WhatsApp
@@ -969,7 +1245,11 @@ function ChatPage() {
                         </BlurFade>
                       ) : waConnecting ? (
                         <div className="relative flex flex-col items-center justify-center overflow-hidden py-10">
-                          <Ripple mainCircleSize={80} numCircles={4} mainCircleOpacity={0.12} />
+                          <Ripple
+                            mainCircleSize={80}
+                            numCircles={4}
+                            mainCircleOpacity={0.12}
+                          />
                           <div className="relative z-10 flex flex-col items-center gap-3">
                             <div className="flex size-14 items-center justify-center rounded-2xl border border-emerald-100 bg-emerald-50">
                               <Loader2 className="size-6 animate-spin text-emerald-600" />
@@ -985,13 +1265,19 @@ function ChatPage() {
                             <QrCode className="size-6 text-emerald-600" />
                           </div>
                           <div className="text-center">
-                            <p className="text-[13px] font-medium text-foreground">Ready to connect</p>
+                            <p className="text-[13px] font-medium text-foreground">
+                              Ready to connect
+                            </p>
                             <p className="mt-0.5 text-[11px] text-muted-foreground">
                               {waQrSession?.message ||
                                 "Generate a QR code to link your WhatsApp"}
                             </p>
                           </div>
-                          <Button size="sm" onClick={startWhatsAppConnect} className="rounded-xl px-5">
+                          <Button
+                            size="sm"
+                            onClick={startWhatsAppConnect}
+                            className="rounded-xl px-5"
+                          >
                             <QrCode className="mr-1.5 size-3.5" />
                             Generate QR Code
                           </Button>
@@ -1025,7 +1311,9 @@ function ChatPage() {
                               Connected
                             </span>
                           </div>
-                          <p className="text-[11px] text-muted-foreground">Receiving messages</p>
+                          <p className="text-[11px] text-muted-foreground">
+                            Receiving messages
+                          </p>
                         </div>
                       </div>
                     </div>
@@ -1039,7 +1327,12 @@ function ChatPage() {
                           <div className="grid grid-cols-2 gap-2">
                             {(
                               [
-                                { value: "personal", label: "Personal", desc: "Daily number", icon: Phone },
+                                {
+                                  value: "personal",
+                                  label: "Personal",
+                                  desc: "Daily number",
+                                  icon: Phone,
+                                },
                                 {
                                   value: "dedicated",
                                   label: "Dedicated",
@@ -1048,19 +1341,25 @@ function ChatPage() {
                                 },
                               ] as const
                             ).map((opt) => {
-                              const active = waSettings.numberType === opt.value;
+                              const active =
+                                waSettings.numberType === opt.value;
                               return (
                                 <MagicCard
                                   key={opt.value}
                                   gradientColor={
-                                    active ? "rgba(37, 211, 102, 0.08)" : "rgba(0,0,0,0.03)"
+                                    active
+                                      ? "rgba(37, 211, 102, 0.08)"
+                                      : "rgba(0,0,0,0.03)"
                                   }
                                   gradientSize={150}
                                   className="cursor-pointer p-0!"
                                 >
                                   <button
                                     onClick={() =>
-                                      setWaSettings((s) => ({ ...s, numberType: opt.value }))
+                                      setWaSettings((s) => ({
+                                        ...s,
+                                        numberType: opt.value,
+                                      }))
                                     }
                                     className={cn(
                                       "relative w-full overflow-hidden rounded-xl border px-3 py-3 text-left transition-all",
@@ -1084,7 +1383,9 @@ function ChatPage() {
                                         <p
                                           className={cn(
                                             "text-[12px] font-semibold",
-                                            active ? "text-emerald-700" : "text-foreground",
+                                            active
+                                              ? "text-emerald-700"
+                                              : "text-foreground",
                                           )}
                                         >
                                           {opt.label}
@@ -1116,16 +1417,30 @@ function ChatPage() {
                           <div className="grid grid-cols-2 gap-2">
                             {(
                               [
-                                { value: "all", label: "Everyone", desc: "All contacts", icon: Users },
-                                { value: "specific", label: "Specific", desc: "Whitelist", icon: Shield },
+                                {
+                                  value: "all",
+                                  label: "Everyone",
+                                  desc: "All contacts",
+                                  icon: Users,
+                                },
+                                {
+                                  value: "specific",
+                                  label: "Specific",
+                                  desc: "Whitelist",
+                                  icon: Shield,
+                                },
                               ] as const
                             ).map((opt) => {
-                              const active = waSettings.accessMode === opt.value;
+                              const active =
+                                waSettings.accessMode === opt.value;
                               return (
                                 <button
                                   key={opt.value}
                                   onClick={() =>
-                                    setWaSettings((s) => ({ ...s, accessMode: opt.value }))
+                                    setWaSettings((s) => ({
+                                      ...s,
+                                      accessMode: opt.value,
+                                    }))
                                   }
                                   className={cn(
                                     "relative w-full overflow-hidden rounded-xl border px-3 py-3 text-left transition-all",
@@ -1149,7 +1464,9 @@ function ChatPage() {
                                       <p
                                         className={cn(
                                           "text-[12px] font-semibold",
-                                          active ? "text-emerald-700" : "text-foreground",
+                                          active
+                                            ? "text-emerald-700"
+                                            : "text-foreground",
                                         )}
                                       >
                                         {opt.label}
@@ -1177,7 +1494,10 @@ function ChatPage() {
                               placeholder="+91 98765 43210, +1 555 0123"
                               value={waSettings.allowedNumbers}
                               onChange={(e) =>
-                                setWaSettings((s) => ({ ...s, allowedNumbers: e.target.value }))
+                                setWaSettings((s) => ({
+                                  ...s,
+                                  allowedNumbers: e.target.value,
+                                }))
                               }
                               className="w-full rounded-xl border border-border bg-card px-3 py-2.5 text-[12px] text-foreground transition-all placeholder:text-muted-foreground focus:border-emerald-500/50 focus:outline-none focus:ring-1 focus:ring-emerald-500/20"
                             />
@@ -1190,7 +1510,9 @@ function ChatPage() {
                           size="sm"
                           className="flex-1 rounded-xl bg-emerald-600 text-[12px] font-semibold text-white shadow-sm hover:bg-emerald-700"
                           onClick={saveWaSettings}
-                          disabled={!waSettings.numberType || !waSettings.accessMode}
+                          disabled={
+                            !waSettings.numberType || !waSettings.accessMode
+                          }
                         >
                           <Check className="mr-1.5 size-3" />
                           Save settings
@@ -1222,7 +1544,9 @@ function ChatPage() {
                         <h3 className="font-heading text-[15px] font-bold tracking-tight text-foreground">
                           Connect Telegram
                         </h3>
-                        <p className="text-[11px] text-muted-foreground">Set up your bot</p>
+                        <p className="text-[11px] text-muted-foreground">
+                          Set up your bot
+                        </p>
                       </div>
                     </div>
                     <div className="px-4 pb-4">
@@ -1231,7 +1555,8 @@ function ChatPage() {
                           <Send className="size-6 text-sky-600" />
                         </div>
                         <p className="max-w-55 text-center text-[12px] text-muted-foreground">
-                          Configure Telegram with your bot token in Channel Settings
+                          Configure Telegram with your bot token in Channel
+                          Settings
                         </p>
                         <Button
                           size="sm"
@@ -1255,7 +1580,10 @@ function ChatPage() {
         </div>
 
         {/* ─── Messages ───────────────────────────────────────────── */}
-        <div ref={messagesContainerRef} className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+        <div
+          ref={messagesContainerRef}
+          className="min-h-0 flex-1 overflow-y-auto overscroll-contain"
+        >
           <div className="mx-auto max-w-3xl px-4 py-6">
             {messages.length === 0 && !conversationId && (
               <div className="flex min-h-[60vh] flex-col items-center justify-center gap-6">
@@ -1303,50 +1631,61 @@ function ChatPage() {
 
             {messages.length === 0 && conversationId && (
               <div className="flex min-h-[40vh] flex-col items-center justify-center">
-                <p className="text-sm text-muted-foreground">No messages yet.</p>
+                <p className="text-sm text-muted-foreground">
+                  No messages yet.
+                </p>
               </div>
             )}
 
             {isChannelConversation && conversationId && (
               <div className="mb-4 flex items-center gap-2 rounded-xl border border-blue-200/40 bg-blue-50/80 px-3.5 py-2 text-xs text-blue-700">
                 <Globe className="size-3.5 shrink-0" />
-                Viewing {CHANNEL_META[activeChannel]?.label} conversation — replies are sent via{" "}
-                {CHANNEL_META[activeChannel]?.label}
+                Viewing {CHANNEL_META[activeChannel]?.label} conversation —
+                replies are sent via {CHANNEL_META[activeChannel]?.label}
               </div>
             )}
 
-            <StreamingChatMessageList
-              messages={chatMessages as StreamingMessage[]}
-              isLoading={isLoading}
-              onConfirm={(id, choice) => {
-                if (!conversationId) return;
-                operonFetch(`/agent/conversations/${conversationId}/confirm`, {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ confirmationId: id, choice }),
-                })
-                  .then(() => {
-                    if (choice.toLowerCase() === "continue") {
-                      void handleSend("Continue from where you stopped.");
-                    }
-                  })
-                  .catch(() => toast.error("Failed to send confirmation"));
-              }}
-              onRetryTool={(ev) => {
-                // Re-issue the tool by asking the agent to retry.
-                handleSend(`Please retry the previous \`${ev.toolName}\` call.`);
-              }}
-              onRegenerate={() => {
-                // Find the last user message and re-send it.
-                const lastUser = [...chatMessages].reverse().find((m) => m.role === "user");
-                if (!lastUser) return;
-                const text = lastUser.orderedParts
-                  .filter((p) => p.type === "text-delta")
-                  .map((p) => (p as { text?: string }).text ?? "")
-                  .join("");
-                if (text.trim()) handleSend(text);
-              }}
-            />
+            <ChatErrorBoundary>
+              <StreamingChatMessageList
+                messages={chatMessages as StreamingMessage[]}
+                isLoading={isLoading}
+                onConfirm={(id, choice) => {
+                  if (!conversationId) return;
+                  operonFetch(
+                    `/agent/conversations/${conversationId}/confirm`,
+                    {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ confirmationId: id, choice }),
+                    },
+                  )
+                    .then(() => {
+                      if (choice.toLowerCase() === "continue") {
+                        void handleSend("Continue from where you stopped.");
+                      }
+                    })
+                    .catch(() => toast.error("Failed to send confirmation"));
+                }}
+                onRetryTool={(ev) => {
+                  // Re-issue the tool by asking the agent to retry.
+                  handleSend(
+                    `Please retry the previous \`${ev.toolName}\` call.`,
+                  );
+                }}
+                onRegenerate={() => {
+                  // Find the last user message and re-send it.
+                  const lastUser = [...chatMessages]
+                    .reverse()
+                    .find((m) => m.role === "user");
+                  if (!lastUser) return;
+                  const text = lastUser.orderedParts
+                    .filter((p) => p.type === "text-delta")
+                    .map((p) => (p as { text?: string }).text ?? "")
+                    .join("");
+                  if (text.trim()) handleSend(text);
+                }}
+              />
+            </ChatErrorBoundary>
 
             <div ref={messagesEndRef} className="h-px" aria-hidden="true" />
           </div>
@@ -1355,7 +1694,10 @@ function ChatPage() {
         {showScrollBtn && (
           <div className="absolute bottom-28 left-1/2 z-10 -translate-x-1/2">
             <ShineBorder
-              shineColor={["hsl(var(--primary))", "hsl(var(--muted-foreground))"]}
+              shineColor={[
+                "hsl(var(--primary))",
+                "hsl(var(--muted-foreground))",
+              ]}
               borderWidth={1}
               duration={6}
               className="rounded-full p-0!"
@@ -1385,7 +1727,27 @@ function ChatPage() {
               }}
               error={chatError}
             />
-            <div className="relative flex flex-col rounded-2xl border border-border bg-card shadow-sm transition-all duration-200 focus-within:border-primary/30 focus-within:shadow-md">
+            <div
+              className={cn(
+                "relative flex flex-col rounded-2xl border bg-card shadow-sm transition-all duration-200 focus-within:border-primary/30 focus-within:shadow-md",
+                dragOver
+                  ? "border-primary/60 bg-primary/5 ring-2 ring-primary/20"
+                  : "border-border",
+              )}
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onDrop={handleDrop}
+            >
+              {dragOver && (
+                <div className="absolute inset-0 z-20 flex items-center justify-center rounded-2xl bg-primary/5 backdrop-blur-sm">
+                  <div className="flex flex-col items-center gap-1 text-primary">
+                    <Upload className="size-6" />
+                    <span className="text-[13px] font-medium">
+                      Drop files here
+                    </span>
+                  </div>
+                </div>
+              )}
               {attachedFiles.length > 0 && (
                 <div className="flex flex-wrap gap-2 px-4 pb-2 pt-4">
                   {attachedFiles.map((af, i) => (
@@ -1395,10 +1757,17 @@ function ChatPage() {
                     >
                       {af.preview ? (
                         // eslint-disable-next-line @next/next/no-img-element
-                        <img src={af.preview} alt="" className="size-9 rounded-lg object-cover" />
+                        <img
+                          src={af.preview}
+                          alt=""
+                          className="size-9 rounded-lg object-cover"
+                        />
                       ) : (
                         <div className="flex size-9 items-center justify-center rounded-lg bg-muted text-muted-foreground">
-                          <FileIcon className="size-4" />
+                          <FileTypeIcon
+                            filename={af.file.name}
+                            className="size-4"
+                          />
                         </div>
                       )}
                       <div className="min-w-0 pr-1">
@@ -1450,7 +1819,11 @@ function ChatPage() {
                       const provider = model.slice(0, model.indexOf("/"));
                       void operonFetch("/providers", {
                         method: "POST",
-                        body: JSON.stringify({ action: "set-default", provider, model }),
+                        body: JSON.stringify({
+                          action: "set-default",
+                          provider,
+                          model,
+                        }),
                       });
                     }
                   }}
@@ -1503,7 +1876,12 @@ function ConversationStatusBar({
     for (let i = messages.length - 1; i >= 0; i--) {
       const m = messages[i];
       for (let j = m.orderedParts.length - 1; j >= 0; j--) {
-        const p = m.orderedParts[j] as { type?: string; totalTokens?: number; promptTokens?: number; completionTokens?: number };
+        const p = m.orderedParts[j] as {
+          type?: string;
+          totalTokens?: number;
+          promptTokens?: number;
+          completionTokens?: number;
+        };
         if (p?.type === "usage" && typeof p.totalTokens === "number") return p;
       }
     }
@@ -1515,7 +1893,8 @@ function ConversationStatusBar({
   for (const m of messages) {
     for (const p of m.orderedParts) {
       const t = (p as { type?: string }).type;
-      if (t === "tool-call-start" || t === "tool-call-input-available") stepCount++;
+      if (t === "tool-call-start" || t === "tool-call-input-available")
+        stepCount++;
     }
   }
 
@@ -1534,11 +1913,15 @@ function ConversationStatusBar({
     setCompactStatus("Starting…");
     setCompactPreview("");
     try {
-      const res = await operonFetch(`/agent/conversations/${conversationId}/compact`, {
-        method: "POST",
-        headers: { Accept: "text/event-stream" },
-      });
-      if (!res.ok || !res.body) throw new Error(`compact failed (${res.status})`);
+      const res = await operonFetch(
+        `/agent/conversations/${conversationId}/compact`,
+        {
+          method: "POST",
+          headers: { Accept: "text/event-stream" },
+        },
+      );
+      if (!res.ok || !res.body)
+        throw new Error(`compact failed (${res.status})`);
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
@@ -1560,10 +1943,16 @@ function ConversationStatusBar({
           const payload = dataLine.slice(5).trim();
           if (!payload) continue;
           try {
-            const ev = JSON.parse(payload) as { type?: string; data?: Record<string, unknown> };
+            const ev = JSON.parse(payload) as {
+              type?: string;
+              data?: Record<string, unknown>;
+            };
             if (ev.type === "progress" && typeof ev.data?.text === "string") {
               setCompactStatus(ev.data.text);
-            } else if (ev.type === "text-delta" && typeof ev.data?.text === "string") {
+            } else if (
+              ev.type === "text-delta" &&
+              typeof ev.data?.text === "string"
+            ) {
               preview += ev.data.text;
               setCompactPreview(preview.slice(-200));
             } else if (ev.type === "done") {
@@ -1602,11 +1991,14 @@ function ConversationStatusBar({
       <div className="flex items-center gap-2">
         {usage && (
           <span className="font-mono">
-            {used.toLocaleString()} tok · {Math.round(pct * 100)}% of {Math.round(ctxWindow / 1000)}k
+            {used.toLocaleString()} tok · {Math.round(pct * 100)}% of{" "}
+            {Math.round(ctxWindow / 1000)}k
           </span>
         )}
         {stepCount > 0 && (
-          <span className="font-mono">· {stepCount} step{stepCount === 1 ? "" : "s"}</span>
+          <span className="font-mono">
+            · {stepCount} step{stepCount === 1 ? "" : "s"}
+          </span>
         )}
         {shouldNudge && (
           <span className="rounded-full bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-600">
@@ -1638,7 +2030,11 @@ function ConversationStatusBar({
           className="inline-flex items-center gap-1 rounded-md border border-border/60 bg-background/60 px-2 py-0.5 text-[11px] hover:bg-muted disabled:opacity-50"
           title="Summarize earlier turns to free up context"
         >
-          {busy ? <Loader2 className="size-3 animate-spin" /> : <Sparkles className="size-3" />}
+          {busy ? (
+            <Loader2 className="size-3 animate-spin" />
+          ) : (
+            <Sparkles className="size-3" />
+          )}
           Compact
         </button>
       </div>

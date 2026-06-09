@@ -87,7 +87,9 @@ export interface CopilotComposerProps {
   participants?: Participant[];
 
   /** Optional file/symbol picker for `#` references. Returns matches for the query. */
-  resolveReferences?: (query: string) => Promise<{ uri: string; label?: string }[]>;
+  resolveReferences?: (
+    query: string,
+  ) => Promise<{ uri: string; label?: string }[]>;
 
   /** Footer hint (right-aligned). */
   footerHint?: string;
@@ -146,8 +148,14 @@ export function CopilotComposer({
 }: CopilotComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [trigger, setTrigger] = useState<ActiveTrigger>({ kind: null, query: "", start: -1 });
-  const [refMatches, setRefMatches] = useState<{ uri: string; label?: string }[]>([]);
+  const [trigger, setTrigger] = useState<ActiveTrigger>({
+    kind: null,
+    query: "",
+    start: -1,
+  });
+  const [refMatches, setRefMatches] = useState<
+    { uri: string; label?: string }[]
+  >([]);
   const [activeIndex, setActiveIndex] = useState(0);
   const [showModelMenu, setShowModelMenu] = useState(false);
 
@@ -179,13 +187,21 @@ export function CopilotComposer({
       const q = trigger.query.toLowerCase();
       return slashCommands
         .filter((c) => c.name.toLowerCase().startsWith(q))
-        .map((c) => ({ key: c.name, label: `/${c.name}`, description: c.description }));
+        .map((c) => ({
+          key: c.name,
+          label: `/${c.name}`,
+          description: c.description,
+        }));
     }
     if (trigger.kind === "participant") {
       const q = trigger.query.toLowerCase();
       return participants
         .filter((p) => p.name.toLowerCase().startsWith(q))
-        .map((p) => ({ key: p.name, label: `@${p.name}`, description: p.description }));
+        .map((p) => ({
+          key: p.name,
+          label: `@${p.name}`,
+          description: p.description,
+        }));
     }
     if (trigger.kind === "reference") {
       return refMatches.map((m) => ({
@@ -197,10 +213,19 @@ export function CopilotComposer({
     return [];
   }, [trigger, slashCommands, participants, refMatches]);
 
-  // Reset highlight when suggestions change.
-  useEffect(() => {
-    setActiveIndex(0);
-  }, [suggestions.length, trigger.kind]);
+  // Reset highlight when suggestions change — state-based to avoid ref-in-render.
+  const [prevSuggestionsLen, setPrevSuggestionsLen] = useState(
+    suggestions.length,
+  );
+  const [prevTriggerKind, setPrevTriggerKind] = useState(trigger.kind);
+  if (
+    suggestions.length !== prevSuggestionsLen ||
+    trigger.kind !== prevTriggerKind
+  ) {
+    setPrevSuggestionsLen(suggestions.length);
+    setPrevTriggerKind(trigger.kind);
+    if (activeIndex !== 0) setActiveIndex(0);
+  }
 
   function applySuggestion(key: string) {
     if (trigger.kind === null || trigger.start < 0) return;
@@ -240,7 +265,9 @@ export function CopilotComposer({
       }
       if (e.key === "ArrowUp") {
         e.preventDefault();
-        setActiveIndex((i) => (i - 1 + suggestions.length) % suggestions.length);
+        setActiveIndex(
+          (i) => (i - 1 + suggestions.length) % suggestions.length,
+        );
         return;
       }
       if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
@@ -346,7 +373,10 @@ export function CopilotComposer({
           onKeyDown={handleKeyDown}
           onBlur={() =>
             // Hide suggestions on blur (but allow click-to-apply via onMouseDown).
-            setTimeout(() => setTrigger({ kind: null, query: "", start: -1 }), 100)
+            setTimeout(
+              () => setTrigger({ kind: null, query: "", start: -1 }),
+              100,
+            )
           }
           disabled={disabled}
           placeholder={

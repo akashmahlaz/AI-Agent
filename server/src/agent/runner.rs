@@ -797,6 +797,18 @@ async fn run(spec: RunnerSpec, handle: RunHandle) -> Result<()> {
                 Some(&spec.model),
             )
             .await?;
+
+            // Auto-generate conversation title on the first turn
+            if _step == 0 {
+                auto_title_conversation(
+                    &spec.db,
+                    &spec.conversation_id,
+                    &spec.initial_user_message,
+                )
+                .await
+                .ok(); // non-fatal
+            }
+
             handle.emit(&events::message_end()).await?;
             set_status(&spec.db, spec.run_id, RunStatus::Completed, None).await?;
             return Ok(());
@@ -1070,6 +1082,10 @@ async fn load_conversation_history(
     .context("loading conversation history")?;
 
     let mut out = Vec::with_capacity(rows.len());
+    // Persistent deduplication set: prevents the same tool_call_id from
+    // producing multiple tool_result blocks across the full conversation
+    // history, which would cause Anthropic to reject the request.
+    let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     for row in rows {
         let role: String = row.try_get("role")?;
         let content: String = row.try_get("content")?;
@@ -1142,18 +1158,25 @@ async fn load_conversation_history(
                         Some(tool_calls.clone())
                     },
                 });
-                // Emit a tool message per tool call recovered.
+                // Emit a tool message per tool call recovered — only for output-available
+                // (each tool has multiple lifecycle parts: start, input-available, execute,
+                // output-available/end — we must emit exactly one tool_result per tool_call_id)
                 if !tool_calls.is_empty() {
                     if let Some(arr) = parts.as_array() {
                         for part in arr {
                             let kind = part.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                            if !kind.starts_with("tool-call") {
+                            // Only emit once per tool_call_id, prefer output-available
+                            if kind != "tool-call-output-available" && kind != "tool-call-output-error" {
                                 continue;
                             }
                             let tool_call_id = part
                                 .get("toolCallId")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("");
+                            if tool_call_id.is_empty() || seen_ids.contains(tool_call_id) {
+                                continue;
+                            }
+                            seen_ids.insert(tool_call_id.to_owned());
                             let tool_name =
                                 part.get("toolName").and_then(|v| v.as_str()).unwrap_or("");
                             let result = part.get("result").cloned().unwrap_or(json!({}));
@@ -1452,4 +1475,69 @@ pub async fn load_events_since(
         });
     }
     Ok(out)
+}
+
+/// Auto-generate a short conversation title from the user's first message.
+/// Truncates to ~60 chars and strips markdown/noise.
+async fn auto_title_conversation(
+    db: &Pool<Postgres>,
+    conversation_id: &Uuid,
+    user_message: &str,
+) -> Result<()> {
+    // Only auto-title if the current title is still the default
+    let row = sqlx::query("select title from conversations where id = $1")
+        .bind(conversation_id)
+        .fetch_optional(db)
+        .await?;
+    let current_title: String = row
+        .as_ref()
+        .and_then(|r| r.try_get("title").ok())
+        .unwrap_or_default();
+    if !current_title.is_empty() && current_title != "New Chat" {
+        return Ok(()); // User or system already set a meaningful title
+    }
+
+    // Generate title: first meaningful line, truncated
+    let title = generate_title_from_prompt(user_message);
+    if title.is_empty() {
+        return Ok(());
+    }
+
+    sqlx::query("update conversations set title = $2, updated_at = now() where id = $1")
+        .bind(conversation_id)
+        .bind(&title)
+        .execute(db)
+        .await
+        .context("updating conversation title")?;
+    Ok(())
+}
+
+/// Simple heuristic title generation from user prompt (no LLM call needed).
+fn generate_title_from_prompt(prompt: &str) -> String {
+    // Take the first line, strip markdown formatting
+    let first_line = prompt
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or(prompt)
+        .trim();
+
+    // Strip common markdown prefixes
+    let cleaned = first_line
+        .trim_start_matches('#')
+        .trim_start_matches('>')
+        .trim_start_matches('-')
+        .trim_start_matches('*')
+        .trim();
+
+    // Truncate to ~50 chars at a word boundary
+    if cleaned.len() <= 50 {
+        return cleaned.to_string();
+    }
+    // Find last space before 50 chars
+    let truncated = &cleaned[..50];
+    if let Some(last_space) = truncated.rfind(' ') {
+        format!("{}...", &cleaned[..last_space])
+    } else {
+        format!("{}...", truncated)
+    }
 }

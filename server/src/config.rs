@@ -21,6 +21,10 @@ pub struct Config {
     pub github_client_secret: Option<String>,
     pub oauth_redirect_base: String,
     pub next_base_url: String,
+    pub aws_region: Option<String>,
+    pub aws_bucket_name: Option<String>,
+    pub aws_access_key: Option<String>,
+    pub aws_secret_key: Option<String>,
 }
 
 impl Config {
@@ -71,6 +75,10 @@ impl Config {
             .ok()
             .filter(|v| !v.is_empty())
             .unwrap_or_else(|| web_origin.trim_end_matches('/').to_owned());
+        let aws_region = env::var("AWS_REGION").ok().filter(|v| !v.is_empty());
+        let aws_bucket_name = env::var("AWS_BUCKET_NAME").ok().filter(|v| !v.is_empty());
+        let aws_access_key = env::var("AWS_ACCESS_KEY").ok().filter(|v| !v.is_empty());
+        let aws_secret_key = env::var("AWS_SECRET_KEY").ok().filter(|v| !v.is_empty());
 
         Ok(Self {
             bind_addr,
@@ -90,6 +98,10 @@ impl Config {
             github_client_secret,
             oauth_redirect_base,
             next_base_url,
+            aws_region,
+            aws_bucket_name,
+            aws_access_key,
+            aws_secret_key,
         })
     }
 }

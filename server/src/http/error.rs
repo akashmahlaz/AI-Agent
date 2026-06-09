@@ -20,8 +20,8 @@ pub enum AppError {
     ServiceUnavailable(String),
     #[error(transparent)]
     Sqlx(#[from] sqlx::Error),
-    #[error("internal server error")]
-    Internal,
+    #[error("internal server error: {0}")]
+    Internal(String),
 }
 
 #[derive(Serialize)]
@@ -37,7 +37,7 @@ impl IntoResponse for AppError {
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
             Self::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
             Self::ServiceUnavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, "service_unavailable"),
-            Self::Sqlx(_) | Self::Internal => {
+            Self::Sqlx(_) | Self::Internal(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal_server_error")
             }
         };
@@ -56,6 +56,6 @@ impl IntoResponse for AppError {
 impl From<argon2::password_hash::Error> for AppError {
     fn from(error: argon2::password_hash::Error) -> Self {
         tracing::warn!(%error, "password hash operation failed");
-        Self::Internal
+        Self::Internal("password hash operation failed".into())
     }
 }

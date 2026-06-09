@@ -1,12 +1,33 @@
 "use client";
 
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import {
+  lazy,
+  memo,
+  Suspense,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { cn } from "@/lib/utils";
 import { describeTool } from "@/components/chat/message/parts/tool-part";
 import { CodeHighlight } from "@/components/chat/message/parts/code-highlight";
-import { EditCard, detectEdit } from "@/components/chat/message/parts/edit-card";
+import {
+  DataTable,
+  parseMarkdownTable,
+} from "@/components/chat/message/parts/data-table";
+import {
+  MediaSkeleton,
+  GeneratedImage,
+  GeneratedVideo,
+  GeneratedAudio,
+} from "@/components/chat/message/parts/media-skeleton";
+import {
+  EditCard,
+  detectEdit,
+} from "@/components/chat/message/parts/edit-card";
 import type {
   StreamingMessage,
   StreamPart,
@@ -41,7 +62,6 @@ import {
   Globe,
   Image as ImageIcon,
   Loader2,
-  MessageSquareText,
   Mic,
   PencilLine,
   Search,
@@ -64,6 +84,96 @@ import {
   KeyRound,
   Upload,
 } from "lucide-react";
+
+// Lazy-load MermaidBlock to avoid bundling mermaid in the main chunk
+const MermaidBlockLazy = lazy(() =>
+  import("@/components/chat/message/parts/mermaid-block").then((m) => ({
+    default: m.MermaidBlock,
+  })),
+);
+function MermaidBlockWrapper({ code }: { code: string }) {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex h-20 items-center justify-center rounded-lg border border-border/50 bg-muted/30 my-2">
+          <span className="text-[11px] text-muted-foreground animate-pulse">
+            Loading diagram…
+          </span>
+        </div>
+      }
+    >
+      <MermaidBlockLazy code={code} />
+    </Suspense>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Media tool helpers — detect generate_image/video/audio and render skeletons
+// ---------------------------------------------------------------------------
+const MEDIA_TOOLS = new Set([
+  "generate_image",
+  "generate_video",
+  "text_to_speech",
+]);
+
+function isMediaTool(toolName: string): boolean {
+  return MEDIA_TOOLS.has(toolName);
+}
+
+function mediaTypeForTool(toolName: string): "image" | "video" | "audio" {
+  if (toolName === "generate_video") return "video";
+  if (toolName === "text_to_speech") return "audio";
+  return "image";
+}
+
+function extractDimension(
+  args: Record<string, unknown> | undefined,
+  key: string,
+): number | undefined {
+  if (!args) return undefined;
+  const v = args[key] ?? args[`${key}px`];
+  return typeof v === "number"
+    ? v
+    : typeof v === "string"
+      ? parseInt(v, 10) || undefined
+      : undefined;
+}
+
+function extractMediaUrl(result: unknown): string | undefined {
+  if (typeof result === "string") {
+    // If it looks like a URL
+    if (result.startsWith("http") || result.startsWith("/")) return result;
+    return undefined;
+  }
+  if (result && typeof result === "object") {
+    const r = result as Record<string, unknown>;
+    return (r.url ??
+      r.publicUrl ??
+      r.imageUrl ??
+      r.image_url ??
+      r.audioUrl ??
+      r.audio_url ??
+      r.videoUrl ??
+      r.video_url) as string | undefined;
+  }
+  return undefined;
+}
+
+function MediaResult({
+  toolName,
+  result,
+}: {
+  toolName: string;
+  result: unknown;
+}) {
+  const url = extractMediaUrl(result);
+  if (!url) return null;
+
+  const type = mediaTypeForTool(toolName);
+  if (type === "image") return <GeneratedImage url={url} />;
+  if (type === "video") return <GeneratedVideo url={url} />;
+  return <GeneratedAudio url={url} />;
+}
 
 const TOOL_ICONS: Record<string, typeof FileText> = {
   read_file: FileText,
@@ -108,15 +218,27 @@ const TOOL_ICONS: Record<string, typeof FileText> = {
   github_save_token: KeyRound,
 };
 
-const ACTIVE_TOOL_STATES = ["calling", "input-streaming", "input-available", "executing"] as const;
+const ACTIVE_TOOL_STATES = [
+  "calling",
+  "input-streaming",
+  "input-available",
+  "executing",
+] as const;
 
 function isActiveToolState(state: string) {
-  return ACTIVE_TOOL_STATES.includes(state as (typeof ACTIVE_TOOL_STATES)[number]);
+  return ACTIVE_TOOL_STATES.includes(
+    state as (typeof ACTIVE_TOOL_STATES)[number],
+  );
 }
 
 function ActivePulseDot({ className }: { className?: string }) {
   return (
-    <span className={cn("relative flex size-3 items-center justify-center", className)}>
+    <span
+      className={cn(
+        "relative flex size-3 items-center justify-center",
+        className,
+      )}
+    >
       <span className="absolute size-2 rounded-full bg-primary/25 animate-ping" />
       <Circle className="relative size-2 fill-primary text-primary animate-(--animate-pulse-soft)" />
     </span>
@@ -139,7 +261,7 @@ function useElapsedTimer(isActive: boolean) {
     startRef.current = Date.now();
     const id = setInterval(
       () => setElapsed(Math.floor((Date.now() - startRef.current) / 1000)),
-      500
+      500,
     );
     return () => clearInterval(id);
   }, [isActive]);
@@ -199,10 +321,17 @@ function TruncatedBlock({
       <div
         className={cn(
           "overflow-hidden transition-[max-height] duration-200",
-          overflow && !expanded && "max-h-50 mask-[linear-gradient(to_bottom,#000_calc(100%-32px),transparent)]",
+          overflow &&
+            !expanded &&
+            "max-h-50 mask-[linear-gradient(to_bottom,#000_calc(100%-32px),transparent)]",
         )}
       >
-        <pre className={cn("overflow-x-auto whitespace-pre-wrap break-all font-mono text-foreground/80", className)}>
+        <pre
+          className={cn(
+            "overflow-x-auto whitespace-pre-wrap break-all font-mono text-foreground/80",
+            className,
+          )}
+        >
           {text}
         </pre>
       </div>
@@ -229,11 +358,20 @@ function TruncatedBlock({
 // ToolCallItem — Copilot-style: invocationMessage during, pastTenseMessage after,
 // collapsible to reveal args + result.
 // ---------------------------------------------------------------------------
-function ToolCallItem({ event, onRetry }: { event: ToolCallEvent; onRetry?: (ev: ToolCallEvent) => void }) {
+function ToolCallItem({
+  event,
+  onRetry,
+}: {
+  event: ToolCallEvent;
+  onRetry?: (ev: ToolCallEvent) => void;
+}) {
   const [open, setOpen] = useState(false);
-  const isPending = ["calling", "input-streaming", "input-available", "executing"].includes(
-    event.state
-  );
+  const isPending = [
+    "calling",
+    "input-streaming",
+    "input-available",
+    "executing",
+  ].includes(event.state);
   const isError = event.state === "output-error";
 
   // Prefer Copilot-style messages when present, otherwise fall back to the
@@ -246,14 +384,15 @@ function ToolCallItem({ event, onRetry }: { event: ToolCallEvent; onRetry?: (ev:
     ? undefined
     : event.pastTenseMessage;
   const msg = isPending
-    ? invocationMessage ?? fallbackMsg
+    ? (invocationMessage ?? fallbackMsg)
     : (pastTenseMessage ?? invocationMessage ?? fallbackMsg);
 
   // Optional inline result-count suffix (Copilot style: "…, 12 results")
   const suffix = (() => {
     if (isPending || isError || event.result == null) return undefined;
     const r = event.result as unknown;
-    if (Array.isArray(r)) return `, ${r.length} ${r.length === 1 ? "result" : "results"}`;
+    if (Array.isArray(r))
+      return `, ${r.length} ${r.length === 1 ? "result" : "results"}`;
     if (typeof r === "object" && r !== null) {
       const obj = r as Record<string, unknown>;
       for (const key of ["results", "items", "matches", "rows", "data"]) {
@@ -290,7 +429,9 @@ function ToolCallItem({ event, onRetry }: { event: ToolCallEvent; onRetry?: (ev:
           <div className="flex min-w-0 items-center gap-2">
             <span className={cn("truncate", isError && "text-destructive")}>
               {msg ?? describeTool(event.toolName, event.args)}
-              {suffix && <span className="text-muted-foreground/70">{suffix}</span>}
+              {suffix && (
+                <span className="text-muted-foreground/70">{suffix}</span>
+              )}
             </span>
             {hasDetails && (
               <ChevronRight
@@ -311,7 +452,10 @@ function ToolCallItem({ event, onRetry }: { event: ToolCallEvent; onRetry?: (ev:
               <div className="mb-0.5 font-mono text-[10px] uppercase tracking-wider text-muted-foreground/55">
                 Input
               </div>
-              <TruncatedBlock text={JSON.stringify(event.args, null, 2)} label="lines" />
+              <TruncatedBlock
+                text={JSON.stringify(event.args, null, 2)}
+                label="lines"
+              />
             </div>
           )}
           {event.errorText && (
@@ -329,8 +473,18 @@ function ToolCallItem({ event, onRetry }: { event: ToolCallEvent; onRetry?: (ev:
                     }}
                     className="inline-flex items-center gap-1 rounded-md border border-destructive/40 px-1.5 py-0.5 text-[10px] text-destructive hover:bg-destructive/10"
                   >
-                    <svg viewBox="0 0 16 16" className="size-2.5" fill="none" stroke="currentColor" strokeWidth="1.5">
-                      <path d="M2 8a6 6 0 1 0 1.76-4.24M2 3v3.5h3.5" strokeLinecap="round" strokeLinejoin="round" />
+                    <svg
+                      viewBox="0 0 16 16"
+                      className="size-2.5"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.5"
+                    >
+                      <path
+                        d="M2 8a6 6 0 1 0 1.76-4.24M2 3v3.5h3.5"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
                     </svg>
                     Retry
                   </button>
@@ -358,6 +512,26 @@ function ToolCallItem({ event, onRetry }: { event: ToolCallEvent; onRetry?: (ev:
           )}
         </div>
       )}
+
+      {/* Media generation: show skeleton while pending, result when done */}
+      {isMediaTool(event.toolName) && isPending && (
+        <div className="ml-6 mt-2">
+          <MediaSkeleton
+            type={mediaTypeForTool(event.toolName)}
+            width={extractDimension(event.args, "width")}
+            height={extractDimension(event.args, "height")}
+            status={invocationMessage ?? undefined}
+          />
+        </div>
+      )}
+      {isMediaTool(event.toolName) &&
+        !isPending &&
+        !isError &&
+        event.result != null && (
+          <div className="ml-6 mt-2">
+            <MediaResult toolName={event.toolName} result={event.result} />
+          </div>
+        )}
     </div>
   );
 }
@@ -371,7 +545,11 @@ function ProgressLine({ ev }: { ev: ProgressEvent }) {
   const error = ev.status === "error";
   const active = !complete && !error;
   return (
-    <div className="flex items-center gap-2 py-0.5 text-[12px] italic text-muted-foreground/75" role="status" aria-live="polite">
+    <div
+      className="flex items-center gap-2 py-0.5 text-[12px] italic text-muted-foreground/75"
+      role="status"
+      aria-live="polite"
+    >
       {complete ? (
         <Check className="size-3 shrink-0 text-muted-foreground/70" />
       ) : error ? (
@@ -379,7 +557,11 @@ function ProgressLine({ ev }: { ev: ProgressEvent }) {
       ) : (
         <Loader2 className="size-3 shrink-0 animate-spin" />
       )}
-      <span className={cn("truncate", active && "shimmer-text animated-ellipsis")}>{ev.text}</span>
+      <span
+        className={cn("truncate", active && "shimmer-text animated-ellipsis")}
+      >
+        {ev.text}
+      </span>
     </div>
   );
 }
@@ -417,10 +599,12 @@ function ReferencePills({ refs }: { refs: ReferenceEvent[] }) {
             key={i}
             className={cn(
               "inline-flex items-center gap-1 rounded-full border bg-muted/40 px-2 py-0.5 text-[11px]",
-              statusColor
+              statusColor,
             )}
           >
-            {r.status === "loading" && <Loader2 className="size-2.5 animate-spin" />}
+            {r.status === "loading" && (
+              <Loader2 className="size-2.5 animate-spin" />
+            )}
             <span className="max-w-50 truncate">{label}</span>
           </span>
         );
@@ -447,7 +631,9 @@ function StreamErrorCard({ ev }: { ev: StreamErrorEvent }) {
           <p className="font-medium">
             {ev.provider ? `${ev.provider} stream error` : "Stream error"}
           </p>
-          <p className="mt-0.5 break-words text-foreground/80">{ev.message}</p>
+          <p className="mt-0.5 wrap-break-word text-foreground/80">
+            {ev.message}
+          </p>
           {ev.requestId && (
             <p className="mt-1 font-mono text-[10.5px] text-muted-foreground">
               request-id: {ev.requestId}
@@ -482,7 +668,9 @@ function TextEditCard({ ev }: { ev: TextEditEvent }) {
         )}
       </div>
       <pre className="overflow-x-auto font-mono text-[11px] text-foreground/80">
-        {typeof ev.edits === "string" ? ev.edits : JSON.stringify(ev.edits, null, 2)}
+        {typeof ev.edits === "string"
+          ? ev.edits
+          : JSON.stringify(ev.edits, null, 2)}
       </pre>
     </div>
   );
@@ -510,7 +698,7 @@ function ConfirmationCard({
               "rounded-md border px-3 py-1 text-[12px] transition-colors",
               ev.resolution === btn
                 ? "border-primary/60 bg-primary/10 text-primary"
-                : "border-border/60 hover:border-border hover:bg-muted"
+                : "border-border/60 hover:border-border hover:bg-muted",
             )}
           >
             {btn}
@@ -536,43 +724,73 @@ function CommandButton({ ev }: { ev: CommandButtonEvent }) {
 function SubagentCard({ events }: { events: SubagentEvent[] }) {
   const start = events.find((event) => event.type === "subagent-start");
   const progress = events.filter((event) => event.type === "subagent-progress");
-  const result = [...events].reverse().find((event) => event.type === "subagent-result");
+  const result = [...events]
+    .reverse()
+    .find((event) => event.type === "subagent-result");
   const streamText = events
-    .filter((event) => event.type === "subagent-stream-delta" && (event.kind ?? "text") === "text")
+    .filter(
+      (event) =>
+        event.type === "subagent-stream-delta" &&
+        (event.kind ?? "text") === "text",
+    )
     .map((event) => event.text ?? "")
     .join("");
   const agentName = result?.agentName ?? start?.agentName ?? "subagent";
   const latestProgress = [...progress].reverse()[0];
   const runId = result?.runId ?? latestProgress?.runId ?? start?.runId;
-  const logUrl = result?.logUrl ?? latestProgress?.logUrl ?? start?.logUrl ?? (runId ? `/dashboard/sessions?runId=${encodeURIComponent(runId)}` : undefined);
-  const resultText = typeof result?.result === "string"
-    ? result.result
-    : result?.result == null
-      ? undefined
-      : JSON.stringify(result.result, null, 2);
+  const logUrl =
+    result?.logUrl ??
+    latestProgress?.logUrl ??
+    start?.logUrl ??
+    (runId
+      ? `/dashboard/sessions?runId=${encodeURIComponent(runId)}`
+      : undefined);
+  const resultText =
+    typeof result?.result === "string"
+      ? result.result
+      : result?.result == null
+        ? undefined
+        : JSON.stringify(result.result, null, 2);
 
   return (
-    <div className="my-1 rounded-md border border-border/70 bg-muted/25 px-3 py-2 text-[12.5px]" role="status" aria-live="polite">
+    <div
+      className="my-1 rounded-md border border-border/70 bg-muted/25 px-3 py-2 text-[12.5px]"
+      role="status"
+      aria-live="polite"
+    >
       <div className="flex items-center gap-2 text-muted-foreground">
-        {result || latestProgress?.status === "complete" ? <Check className="size-3.5" /> : latestProgress?.status === "error" ? <AlertCircle className="size-3.5 text-destructive" /> : <Loader2 className="size-3.5 animate-spin" />}
+        {result || latestProgress?.status === "complete" ? (
+          <Check className="size-3.5" />
+        ) : latestProgress?.status === "error" ? (
+          <AlertCircle className="size-3.5 text-destructive" />
+        ) : (
+          <Loader2 className="size-3.5 animate-spin" />
+        )}
         <span className="font-medium text-foreground/85">
           {result ? `Completed ${agentName}` : `Delegating to ${agentName}`}
         </span>
       </div>
       {start?.prompt && (
-        <div className="mt-1 line-clamp-2 text-muted-foreground/75">{start.prompt}</div>
+        <div className="mt-1 line-clamp-2 text-muted-foreground/75">
+          {start.prompt}
+        </div>
       )}
       {streamText && !result && (
         <div className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap border-l-2 border-border/50 pl-2 text-[12px] italic text-muted-foreground/80">
           {streamText}
-          <span className="ml-px inline-block h-[0.9em] w-[1px] -translate-y-[1px] animate-pulse bg-current align-middle" />
+          <span className="ml-px inline-block h-[0.9em] w-px -translate-y-px animate-pulse bg-current align-middle" />
         </div>
       )}
       {latestProgress?.text && !streamText && !result && (
-        <div className="mt-1 text-muted-foreground/75">{latestProgress.text}</div>
+        <div className="mt-1 text-muted-foreground/75">
+          {latestProgress.text}
+        </div>
       )}
       {logUrl && (
-        <a href={logUrl} className="mt-2 inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground">
+        <a
+          href={logUrl}
+          className="mt-2 inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
+        >
           <ExternalLink className="size-3" /> Open child run
         </a>
       )}
@@ -581,15 +799,6 @@ function SubagentCard({ events }: { events: SubagentEvent[] }) {
           {resultText}
         </pre>
       )}
-    </div>
-  );
-}
-
-function UsageBadge({ ev }: { ev: UsageEvent }) {
-  return (
-    <div className="mt-2 text-[10px] text-muted-foreground/50">
-      {ev.totalTokens.toLocaleString()} tokens · {ev.promptTokens.toLocaleString()} in ·{" "}
-      {ev.completionTokens.toLocaleString()} out
     </div>
   );
 }
@@ -619,7 +828,11 @@ function WorkingSetHeader({ events }: { events: ToolCallEvent[] }) {
         editedSet.add(args.path as string);
         continue;
       }
-      if ((ev.toolName === "read_file" || ev.toolName === "workspace_file_read") && typeof args.path === "string") {
+      if (
+        (ev.toolName === "read_file" ||
+          ev.toolName === "workspace_file_read") &&
+        typeof args.path === "string"
+      ) {
         readSet.add(args.path as string);
       }
     }
@@ -661,7 +874,9 @@ function WorkingSetHeader({ events }: { events: ToolCallEvent[] }) {
           </span>
         ))}
       {summary.edited.length === 0 && summary.read.length > 4 && (
-        <span className="text-muted-foreground/65">+{summary.read.length - 4} more</span>
+        <span className="text-muted-foreground/65">
+          +{summary.read.length - 4} more
+        </span>
       )}
     </div>
   );
@@ -672,16 +887,30 @@ function WorkingSetHeader({ events }: { events: ToolCallEvent[] }) {
 // tool calls (apply_patch / write_file) render as inline diff cards instead
 // of generic pills.
 // ---------------------------------------------------------------------------
-function ToolCallList({ events, onRetry }: { events: ToolCallEvent[]; onRetry?: (ev: ToolCallEvent) => void }) {
+function ToolCallList({
+  events,
+  onRetry,
+}: {
+  events: ToolCallEvent[];
+  onRetry?: (ev: ToolCallEvent) => void;
+}) {
   if (!events.length) return null;
   return (
     <div className="space-y-0.5">
       {events.map((ev, i) => {
         const edit = detectEdit(ev);
         if (edit) {
-          return <EditCard key={`${ev.toolCallId}-${i}`} event={ev} payload={edit} />;
+          return (
+            <EditCard key={`${ev.toolCallId}-${i}`} event={ev} payload={edit} />
+          );
         }
-        return <ToolCallItem key={`${ev.toolCallId}-${i}`} event={ev} onRetry={onRetry} />;
+        return (
+          <ToolCallItem
+            key={`${ev.toolCallId}-${i}`}
+            event={ev}
+            onRetry={onRetry}
+          />
+        );
       })}
     </div>
   );
@@ -775,7 +1004,11 @@ function ThinkingRun({
   const [open, setOpen] = useState(true);
   const title = deriveThinkingRunTitle(segments, active);
   const hasVisibleReasoning = segments.some(
-    (segment) => segment.kind === "reasoning" && segment.events.some((event) => event.type === "reasoning-delta" && event.text.trim()),
+    (segment) =>
+      segment.kind === "reasoning" &&
+      segment.events.some(
+        (event) => event.type === "reasoning-delta" && event.text.trim(),
+      ),
   );
 
   return (
@@ -791,12 +1024,18 @@ function ThinkingRun({
         ) : (
           <Check className="size-3 text-muted-foreground/75" />
         )}
-        <span className={cn("truncate", active && "font-medium text-foreground/85")}>{title.title}</span>
+        <span
+          className={cn("truncate", active && "font-medium text-foreground/85")}
+        >
+          {title.title}
+        </span>
         {title.detail && (
-          <span className={cn(
-            "min-w-0 truncate text-muted-foreground/65",
-            active ? "shimmer-text animated-ellipsis" : null,
-          )}>
+          <span
+            className={cn(
+              "min-w-0 truncate text-muted-foreground/65",
+              active ? "shimmer-text animated-ellipsis" : null,
+            )}
+          >
             {title.detail}
           </span>
         )}
@@ -821,11 +1060,19 @@ function ThinkingRun({
                 />
               );
             }
-            return <ToolCallList key={`tools-${index}`} events={segment.tools} onRetry={onRetry} />;
+            return (
+              <ToolCallList
+                key={`tools-${index}`}
+                events={segment.tools}
+                onRetry={onRetry}
+              />
+            );
           })}
           {active && !hasVisibleReasoning && (
             <div className="py-0.5 text-[12.5px] text-muted-foreground/80">
-              <span className="shimmer-text animated-ellipsis">{title.detail ?? title.title}</span>
+              <span className="shimmer-text animated-ellipsis">
+                {title.detail ?? title.title}
+              </span>
             </div>
           )}
         </div>
@@ -841,7 +1088,8 @@ function CodeBlockFenced({ code, lang }: { code: string; lang: string }) {
   const [copied, setCopied] = useState(false);
   const [applied, setApplied] = useState(false);
   const looksLikeCode =
-    !!lang && !["text", "txt", "plaintext", "log", "output"].includes(lang.toLowerCase());
+    !!lang &&
+    !["text", "txt", "plaintext", "log", "output"].includes(lang.toLowerCase());
   return (
     <div className="group/code relative my-2 overflow-hidden rounded-lg border border-border/60 bg-muted/40">
       <div className="flex items-center justify-between border-b border-border/50 px-3 py-1 text-[10.5px] font-medium uppercase tracking-wide text-muted-foreground/80">
@@ -851,7 +1099,9 @@ function CodeBlockFenced({ code, lang }: { code: string; lang: string }) {
             <button
               onClick={() => {
                 window.dispatchEvent(
-                  new CustomEvent("copilot:apply-code", { detail: { code, lang } }),
+                  new CustomEvent("copilot:apply-code", {
+                    detail: { code, lang },
+                  }),
                 );
                 setApplied(true);
                 setTimeout(() => setApplied(false), 2000);
@@ -860,9 +1110,13 @@ function CodeBlockFenced({ code, lang }: { code: string; lang: string }) {
               title="Apply this code"
             >
               {applied ? (
-                <><Check className="size-3" /> Applied</>
+                <>
+                  <Check className="size-3" /> Applied
+                </>
               ) : (
-                <><FileText className="size-3" /> Apply</>
+                <>
+                  <FileText className="size-3" /> Apply
+                </>
               )}
             </button>
           )}
@@ -875,9 +1129,13 @@ function CodeBlockFenced({ code, lang }: { code: string; lang: string }) {
             className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10.5px] text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground"
           >
             {copied ? (
-              <><Check className="size-3" /> Copied</>
+              <>
+                <Check className="size-3" /> Copied
+              </>
             ) : (
-              <><Copy className="size-3" /> Copy</>
+              <>
+                <Copy className="size-3" /> Copy
+              </>
             )}
           </button>
         </div>
@@ -949,8 +1207,13 @@ type RenderSegment =
   | { kind: "usage"; ev: UsageEvent }
   | { kind: "stream-error"; ev: StreamErrorEvent };
 
-type ThinkingRunSegment = Extract<RenderSegment, { kind: "reasoning" } | { kind: "tools" }>;
-type RenderGroup = RenderSegment | { kind: "thinking-run"; segments: ThinkingRunSegment[] };
+type ThinkingRunSegment = Extract<
+  RenderSegment,
+  { kind: "reasoning" } | { kind: "tools" }
+>;
+type RenderGroup =
+  | RenderSegment
+  | { kind: "thinking-run"; segments: ThinkingRunSegment[] };
 
 function isThinkingRunSegment(seg: RenderSegment): seg is ThinkingRunSegment {
   return seg.kind === "reasoning" || seg.kind === "tools";
@@ -981,22 +1244,38 @@ function groupThinkingRuns(segments: RenderSegment[]): RenderGroup[] {
 }
 
 function toolMessage(event: ToolCallEvent): string {
-  const isPending = ["calling", "input-streaming", "input-available", "executing"].includes(event.state);
+  const isPending = [
+    "calling",
+    "input-streaming",
+    "input-available",
+    "executing",
+  ].includes(event.state);
   const fallback = describeTool(event.toolName, event.args);
-  const invocation = event.invocationMessage?.includes(event.toolName) ? undefined : event.invocationMessage;
-  const past = event.pastTenseMessage?.includes(event.toolName) ? undefined : event.pastTenseMessage;
-  return isPending ? invocation ?? fallback : past ?? invocation ?? fallback;
+  const invocation = event.invocationMessage?.includes(event.toolName)
+    ? undefined
+    : event.invocationMessage;
+  const past = event.pastTenseMessage?.includes(event.toolName)
+    ? undefined
+    : event.pastTenseMessage;
+  return isPending
+    ? (invocation ?? fallback)
+    : (past ?? invocation ?? fallback);
 }
 
 function thinkingRunTools(segments: ThinkingRunSegment[]) {
-  return segments.flatMap((segment) => segment.kind === "tools" ? segment.tools : []);
+  return segments.flatMap((segment) =>
+    segment.kind === "tools" ? segment.tools : [],
+  );
 }
 
 function isToolActive(tool: ToolCallEvent) {
   return isActiveToolState(tool.state);
 }
 
-function deriveThinkingRunTitle(segments: ThinkingRunSegment[], active: boolean) {
+function deriveThinkingRunTitle(
+  segments: ThinkingRunSegment[],
+  active: boolean,
+) {
   const tools = thinkingRunTools(segments);
   const activeTool = [...tools].reverse().find(isToolActive);
 
@@ -1015,8 +1294,12 @@ function deriveThinkingRunTitle(segments: ThinkingRunSegment[], active: boolean)
     return { title: toolMessage(tools[0]) };
   }
 
-  const allSearch = tools.every((tool) => /search|grep|find|list/i.test(tool.toolName));
-  const allRead = tools.every((tool) => /read|get_file|list_dir/i.test(tool.toolName));
+  const allSearch = tools.every((tool) =>
+    /search|grep|find|list/i.test(tool.toolName),
+  );
+  const allRead = tools.every((tool) =>
+    /read|get_file|list_dir/i.test(tool.toolName),
+  );
   if (allSearch) {
     return { title: `Searched for ${tools.length} things` };
   }
@@ -1049,7 +1332,10 @@ function buildSegments(parts: StreamPart[]): RenderSegment[] {
       if (existing) {
         Object.assign(existing, {
           ...t,
-          toolName: t.toolName && t.toolName !== "tool" ? t.toolName : existing.toolName,
+          toolName:
+            t.toolName && t.toolName !== "tool"
+              ? t.toolName
+              : existing.toolName,
           args: t.args ?? existing.args,
           invocationMessage: t.invocationMessage ?? existing.invocationMessage,
           pastTenseMessage: t.pastTenseMessage ?? existing.pastTenseMessage,
@@ -1102,7 +1388,12 @@ function buildSegments(parts: StreamPart[]): RenderSegment[] {
     ) {
       const subagent = part as SubagentEvent;
       const lastSubagent = last?.kind === "subagent" ? last : undefined;
-      if (lastSubagent && lastSubagent.events.some((event) => event.toolCallId === subagent.toolCallId)) {
+      if (
+        lastSubagent &&
+        lastSubagent.events.some(
+          (event) => event.toolCallId === subagent.toolCallId,
+        )
+      ) {
         lastSubagent.events.push(subagent);
       } else {
         segs.push({ kind: "subagent", events: [subagent] });
@@ -1147,7 +1438,14 @@ function StreamingTextCodeBlock({
     );
   }
   const lang = className?.replace("language-", "") ?? "";
-  return <CodeBlockFenced code={String(children ?? "").replace(/\n$/, "")} lang={lang} />;
+  const code = String(children ?? "").replace(/\n$/, "");
+
+  // Render mermaid diagrams as SVG
+  if (lang === "mermaid" && code.trim()) {
+    return <MermaidBlockWrapper code={code} />;
+  }
+
+  return <CodeBlockFenced code={code} lang={lang} />;
 }
 const STREAMING_MARKDOWN_COMPONENTS = { code: StreamingTextCodeBlock } as const;
 const STREAMING_REMARK_PLUGINS = [remarkGfm];
@@ -1155,15 +1453,28 @@ const STREAMING_REMARK_PLUGINS = [remarkGfm];
 // FrozenMarkdown — already-closed paragraphs that will never re-render unless
 // the upstream `text` prop literally changes. Memo equality short-circuits the
 // expensive remark/markdown parse for everything before the live tail.
-const FrozenMarkdown = memo(function FrozenMarkdown({ text }: { text: string }) {
+const FrozenMarkdown = memo(function FrozenMarkdown({
+  text,
+}: {
+  text: string;
+}) {
   return (
-    <Markdown remarkPlugins={STREAMING_REMARK_PLUGINS} components={STREAMING_MARKDOWN_COMPONENTS}>
+    <Markdown
+      remarkPlugins={STREAMING_REMARK_PLUGINS}
+      components={STREAMING_MARKDOWN_COMPONENTS}
+    >
       {text}
     </Markdown>
   );
 });
 
-const StreamingText = memo(function StreamingText({ text, isStreaming }: { text: string; isStreaming: boolean }) {
+const StreamingText = memo(function StreamingText({
+  text,
+  isStreaming,
+}: {
+  text: string;
+  isStreaming: boolean;
+}) {
   // VS Code-style progressive markdown: split text on the LAST paragraph
   // boundary while streaming. Everything before is "frozen" — renders once and
   // stays. Only the trailing partial paragraph re-parses on each token, which
@@ -1177,10 +1488,61 @@ const StreamingText = memo(function StreamingText({ text, isStreaming }: { text:
     if (insideFence) return { frozen: "", live: text };
     const lastBreak = text.lastIndexOf("\n\n");
     if (lastBreak === -1) return { frozen: "", live: text };
-    return { frozen: text.slice(0, lastBreak + 2), live: text.slice(lastBreak + 2) };
+    return {
+      frozen: text.slice(0, lastBreak + 2),
+      live: text.slice(lastBreak + 2),
+    };
+  }, [text, isStreaming]);
+
+  // When not streaming, check if the text is a large markdown table that benefits from DataTable
+  const tableData = useMemo(() => {
+    if (isStreaming) return null;
+    // Only try to detect tables if the text looks like it could be one
+    // (starts with a pipe, or has multiple table rows)
+    const tableMatch = text.match(
+      /^\|.+\|[\s\S]*?\n\|[-: |]+\|[\s\S]*?\n(\|.+\|[\s\S]*)/m,
+    );
+    if (!tableMatch) return null;
+    // Extract just the table portion
+    const tableStart = text.indexOf(tableMatch[0]);
+    const tableText = text.slice(tableStart).split(/\n\n/)[0]; // table ends at double newline
+    const parsed = parseMarkdownTable(tableText);
+    if (parsed && parsed.rows.length >= 5)
+      return {
+        parsed,
+        beforeTable: text.slice(0, tableStart),
+        afterTable: text.slice(tableStart + tableText.length),
+      };
+    return null;
   }, [text, isStreaming]);
 
   if (!text) return null;
+
+  if (tableData) {
+    return (
+      <div
+        className={cn(
+          "prose prose-sm max-w-none wrap-break-word leading-relaxed text-foreground",
+          "prose-headings:font-heading prose-headings:text-foreground prose-p:my-1.5",
+          "prose-code:before:content-none prose-code:after:content-none",
+          "prose-pre:m-0 prose-pre:bg-transparent prose-pre:p-0",
+          "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
+        )}
+      >
+        {tableData.beforeTable && (
+          <FrozenMarkdown text={tableData.beforeTable} />
+        )}
+        <DataTable
+          headers={tableData.parsed.headers}
+          rows={tableData.parsed.rows}
+          className="my-2"
+        />
+        {tableData.afterTable.trim() && (
+          <FrozenMarkdown text={tableData.afterTable} />
+        )}
+      </div>
+    );
+  }
 
   return (
     <div
@@ -1194,7 +1556,10 @@ const StreamingText = memo(function StreamingText({ text, isStreaming }: { text:
     >
       {frozen && <FrozenMarkdown text={frozen} />}
       {live && (
-        <Markdown remarkPlugins={STREAMING_REMARK_PLUGINS} components={STREAMING_MARKDOWN_COMPONENTS}>
+        <Markdown
+          remarkPlugins={STREAMING_REMARK_PLUGINS}
+          components={STREAMING_MARKDOWN_COMPONENTS}
+        >
           {live}
         </Markdown>
       )}
@@ -1258,7 +1623,9 @@ function StreamingAssistantMessage({
 
   // Full text across all text segments — for copy button
   const allText = segments
-    .filter((s): s is { kind: "text"; events: TextDeltaEvent[] } => s.kind === "text")
+    .filter(
+      (s): s is { kind: "text"; events: TextDeltaEvent[] } => s.kind === "text",
+    )
     .flatMap((s) => s.events)
     .map((e) => e.text)
     .join("");
@@ -1276,7 +1643,10 @@ function StreamingAssistantMessage({
   );
 
   return (
-    <div className="group/msg py-2.5" data-chat-streaming={isStreamingThis ? "true" : undefined}>
+    <div
+      className="group/msg py-2.5"
+      data-chat-streaming={isStreamingThis ? "true" : undefined}
+    >
       <WorkingSetHeader events={allToolEvents} />
       {showWorking && (
         <div className="mb-2 flex items-center gap-2 text-[12px] text-muted-foreground">
@@ -1291,7 +1661,9 @@ function StreamingAssistantMessage({
           const isLastSeg = isStreamingThis && i === renderGroups.length - 1;
 
           if (seg.kind === "thinking-run") {
-            const hasActiveTool = thinkingRunTools(seg.segments).some(isToolActive);
+            const hasActiveTool = thinkingRunTools(seg.segments).some(
+              isToolActive,
+            );
             return (
               <ThinkingRun
                 key={i}
@@ -1308,12 +1680,16 @@ function StreamingAssistantMessage({
                 key={i}
                 reasoningEvents={seg.events}
                 isStreaming={isLastSeg}
-                activeToolNames={activeToolNames.length > 0 ? activeToolNames : undefined}
+                activeToolNames={
+                  activeToolNames.length > 0 ? activeToolNames : undefined
+                }
               />
             );
           }
           if (seg.kind === "tools") {
-            return <ToolCallList key={i} events={seg.tools} onRetry={onRetryTool} />;
+            return (
+              <ToolCallList key={i} events={seg.tools} onRetry={onRetryTool} />
+            );
           }
           if (seg.kind === "text") {
             const text = seg.events.map((e) => e.text).join("");
@@ -1343,7 +1719,9 @@ function StreamingAssistantMessage({
             return <TextEditCard key={i} ev={seg.ev} />;
           }
           if (seg.kind === "confirmation") {
-            return <ConfirmationCard key={i} ev={seg.ev} onResolve={onConfirm} />;
+            return (
+              <ConfirmationCard key={i} ev={seg.ev} onResolve={onConfirm} />
+            );
           }
           if (seg.kind === "command-button") {
             return <CommandButton key={i} ev={seg.ev} />;
@@ -1385,7 +1763,8 @@ function MessageToolbar({
   const [feedback, setFeedback] = useState<"up" | "down" | null>(null);
   const [shared, setShared] = useState(false);
 
-  const btn = "inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground";
+  const btn =
+    "inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground";
 
   return (
     <div className="mt-1 flex items-center gap-0.5 opacity-0 transition-opacity group-hover/msg:opacity-100 focus-within:opacity-100">
@@ -1399,7 +1778,11 @@ function MessageToolbar({
         aria-label="Copy message"
         className={btn}
       >
-        {copied ? <Check className="size-3.5 text-emerald-600" /> : <Copy className="size-3.5" />}
+        {copied ? (
+          <Check className="size-3.5 text-emerald-600" />
+        ) : (
+          <Copy className="size-3.5" />
+        )}
       </button>
       {onRegenerate && (
         <button
@@ -1440,7 +1823,11 @@ function MessageToolbar({
         aria-label="Share message"
         className={btn}
       >
-        {shared ? <Check className="size-3.5 text-emerald-600" /> : <Share2 className="size-3.5" />}
+        {shared ? (
+          <Check className="size-3.5 text-emerald-600" />
+        ) : (
+          <Share2 className="size-3.5" />
+        )}
       </button>
     </div>
   );
@@ -1507,7 +1894,9 @@ export function StreamingChatMessageList({
           onRetryTool={onRetryTool}
           onRegenerate={
             // Only the most recent assistant message gets regenerate
-            idx === messages.length - 1 && message.role === "assistant" ? onRegenerate : undefined
+            idx === messages.length - 1 && message.role === "assistant"
+              ? onRegenerate
+              : undefined
           }
         />
       ))}
@@ -1526,15 +1915,22 @@ function UsedReferencesSection({ segments }: { segments: RenderSegment[] }) {
   const refs: UsedRef[] = [];
   for (const s of segments) {
     if (s.kind === "references") {
-      for (const r of s.refs) refs.push({ kind: "reference", label: r.title ?? r.uri, uri: r.uri });
+      for (const r of s.refs)
+        refs.push({ kind: "reference", label: r.title ?? r.uri, uri: r.uri });
     } else if (s.kind === "anchor") {
-      refs.push({ kind: "anchor", label: s.ev.title ?? s.ev.uri, uri: s.ev.uri });
+      refs.push({
+        kind: "anchor",
+        label: s.ev.title ?? s.ev.uri,
+        uri: s.ev.uri,
+      });
     } else if (s.kind === "sources") {
-      for (const u of s.urls) refs.push({ kind: "source", label: u.title ?? u.url, uri: u.url });
+      for (const u of s.urls)
+        refs.push({ kind: "source", label: u.title ?? u.url, uri: u.url });
     } else if (s.kind === "tools") {
       for (const t of s.tools) {
         const args = t.args as Record<string, unknown> | undefined;
-        const uri = args && typeof args.path === "string" ? args.path : undefined;
+        const uri =
+          args && typeof args.path === "string" ? args.path : undefined;
         if (uri) refs.push({ kind: "tool", label: uri, uri });
       }
     }
@@ -1559,18 +1955,26 @@ function UsedReferencesSection({ segments }: { segments: RenderSegment[] }) {
         aria-expanded={open}
         className="inline-flex items-center gap-1 text-muted-foreground/70 hover:text-muted-foreground"
       >
-        <ChevronRight className={cn("size-3 transition-transform", open && "rotate-90")} />
+        <ChevronRight
+          className={cn("size-3 transition-transform", open && "rotate-90")}
+        />
         <span>
-          Used {unique.length} {unique.length === 1 ? "reference" : "references"}
+          Used {unique.length}{" "}
+          {unique.length === 1 ? "reference" : "references"}
         </span>
       </button>
       {open && (
         <ul className="mt-1.5 space-y-1 border-l border-border/60 pl-3">
           {unique.map((r, i) => (
-            <li key={i} className="flex items-center gap-1.5 truncate font-mono text-[11px] text-muted-foreground/75">
+            <li
+              key={i}
+              className="flex items-center gap-1.5 truncate font-mono text-[11px] text-muted-foreground/75"
+            >
               <FileText className="size-2.5 shrink-0" />
               {r.uri ? (
-                <a href={r.uri} className="truncate hover:text-foreground">{r.label}</a>
+                <a href={r.uri} className="truncate hover:text-foreground">
+                  {r.label}
+                </a>
               ) : (
                 <span className="truncate">{r.label}</span>
               )}

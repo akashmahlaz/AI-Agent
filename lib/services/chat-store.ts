@@ -142,18 +142,12 @@ export async function appendMessage(conversationId: string, userId: string, mess
     createdAt: message.createdAt,
   };
 
-  const titleUpdate =
-    message.role === "user" && existing.title === "New Chat" && message.content.trim()
-      ? { title: message.content.trim().slice(0, 60) }
-      : {};
-
   await Promise.all([
     messages().insertOne(messageDocument),
     conversations().updateOne(
       { _id: conversationId, userId },
       {
         $set: {
-          ...titleUpdate,
           lastMessage: message.content.slice(0, 140),
           updatedAt: message.createdAt,
         },

@@ -106,8 +106,10 @@ pub async fn create_run(
 
     let conversation_id = match payload.conversation_id {
         Some(id) => {
-            // verify the user owns it
-            let row = sqlx::query("select user_id from conversations where id = $1")
+            // verify the user owns it, and update the title to the first prompt
+            // if it still has the default "New Chat" title (front-end creates
+            // the conversation document before sending the first message).
+            let row = sqlx::query("select user_id, title from conversations where id = $1")
                 .bind(id)
                 .fetch_optional(&state.db)
                 .await?;
@@ -117,6 +119,16 @@ pub async fn create_run(
                     let owner: Uuid = r.try_get("user_id")?;
                     if owner != user_id {
                         return Err(AppError::Unauthorized);
+                    }
+                    let current_title: String = r.try_get("title")?;
+                    if current_title == "New Chat" {
+                        sqlx::query(
+                            "update conversations set title = $2, updated_at = now() where id = $1",
+                        )
+                        .bind(id)
+                        .bind(truncate_title(prompt))
+                        .execute(&state.db)
+                        .await?;
                     }
                     id
                 }

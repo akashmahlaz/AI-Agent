@@ -158,7 +158,7 @@ pub async fn logout() -> AppResult<(HeaderMap, Json<serde_json::Value>)> {
         header::SET_COOKIE,
         clear_cookie_header()?
             .parse()
-            .map_err(|_| AppError::Internal)?,
+            .map_err(|_| AppError::Internal("internal error".into()))?,
     );
 
     Ok((headers, Json(serde_json::json!({ "ok": true }))))
@@ -183,7 +183,7 @@ pub async fn google_oauth_callback(
     let http_client = reqwest::ClientBuilder::new()
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        .map_err(|_| AppError::Internal)?;
+        .map_err(|_| AppError::Internal("internal error".into()))?;
     let token = client
         .exchange_code(AuthorizationCode::new(query.code))
         .request_async(&http_client)
@@ -282,16 +282,16 @@ fn github_oauth_client(state: &AppState) -> AppResult<GithubClient> {
         "{}/auth/oauth/github/callback",
         state.config.oauth_redirect_base.trim_end_matches('/')
     );
-    let redirect_url = RedirectUrl::new(redirect).map_err(|_| AppError::Internal)?;
+    let redirect_url = RedirectUrl::new(redirect).map_err(|_| AppError::Internal("internal error".into()))?;
     Ok(BasicClient::new(ClientId::new(client_id))
         .set_client_secret(ClientSecret::new(client_secret))
         .set_auth_uri(
             AuthUrl::new("https://github.com/login/oauth/authorize".to_owned())
-                .map_err(|_| AppError::Internal)?,
+                .map_err(|_| AppError::Internal("internal error".into()))?,
         )
         .set_token_uri(
             TokenUrl::new("https://github.com/login/oauth/access_token".to_owned())
-                .map_err(|_| AppError::Internal)?,
+                .map_err(|_| AppError::Internal("internal error".into()))?,
         )
         .set_redirect_uri(redirect_url))
 }
@@ -301,7 +301,7 @@ fn encode_link_state(secret: &str, user_id: Uuid) -> AppResult<String> {
         user_id,
         exp: (Utc::now() + Duration::minutes(10)).timestamp(),
     };
-    let json = serde_json::to_vec(&payload).map_err(|_| AppError::Internal)?;
+    let json = serde_json::to_vec(&payload).map_err(|_| AppError::Internal("internal error".into()))?;
     let payload_b64 = Base64UrlUnpadded::encode_string(&json);
     let signature = sign(secret, payload_b64.as_bytes())?;
     Ok(format!("{payload_b64}.{signature}"))
@@ -369,7 +369,7 @@ pub async fn github_oauth_callback(
     let http_client = reqwest::ClientBuilder::new()
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        .map_err(|_| AppError::Internal)?;
+        .map_err(|_| AppError::Internal("internal error".into()))?;
     let token = client
         .exchange_code(AuthorizationCode::new(query.code))
         .request_async(&http_client)
@@ -499,11 +499,11 @@ fn google_oauth_client(state: &AppState) -> AppResult<GoogleClient> {
         "{}/auth/oauth/google/callback",
         state.config.oauth_redirect_base.trim_end_matches('/')
     );
-    let redirect_url = RedirectUrl::new(redirect).map_err(|_| AppError::Internal)?;
+    let redirect_url = RedirectUrl::new(redirect).map_err(|_| AppError::Internal("internal error".into()))?;
     Ok(BasicClient::new(ClientId::new(client_id))
         .set_client_secret(ClientSecret::new(client_secret))
-        .set_auth_uri(AuthUrl::new("https://accounts.google.com/o/oauth2/v2/auth".to_owned()).map_err(|_| AppError::Internal)?)
-        .set_token_uri(TokenUrl::new("https://oauth2.googleapis.com/token".to_owned()).map_err(|_| AppError::Internal)?)
+        .set_auth_uri(AuthUrl::new("https://accounts.google.com/o/oauth2/v2/auth".to_owned()).map_err(|_| AppError::Internal("internal error".into()))?)
+        .set_token_uri(TokenUrl::new("https://oauth2.googleapis.com/token".to_owned()).map_err(|_| AppError::Internal("internal error".into()))?)
         .set_redirect_uri(redirect_url))
 }
 
@@ -634,7 +634,7 @@ fn issue_auth_response(
             state.config.cookie_secure,
         )?
         .parse()
-        .map_err(|_| AppError::Internal)?,
+        .map_err(|_| AppError::Internal("internal error".into()))?,
     );
 
     Ok((
@@ -698,7 +698,7 @@ fn decode_claims(state: &AppState, token: &str) -> AppResult<Claims> {
 }
 
 fn encode_claims(secret: &str, claims: &Claims) -> AppResult<String> {
-    let claims_json = serde_json::to_vec(claims).map_err(|_| AppError::Internal)?;
+    let claims_json = serde_json::to_vec(claims).map_err(|_| AppError::Internal("internal error".into()))?;
     let claims_part = Base64UrlUnpadded::encode_string(&claims_json);
     let signed_payload = format!("{TOKEN_VERSION}.{claims_part}");
     let signature = sign(secret, signed_payload.as_bytes())?;
@@ -721,7 +721,7 @@ pub fn mint_service_token(secret: &str, user_id: Uuid, ttl_seconds: i64) -> AppR
 }
 
 fn sign(secret: &str, payload: &[u8]) -> AppResult<String> {
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).map_err(|_| AppError::Internal)?;
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).map_err(|_| AppError::Internal("internal error".into()))?;
     mac.update(payload);
     Ok(Base64UrlUnpadded::encode_string(
         &mac.finalize().into_bytes(),

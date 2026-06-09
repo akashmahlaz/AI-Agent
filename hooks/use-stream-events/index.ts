@@ -85,7 +85,14 @@ interface SSEEvent {
     uri?: string;
     line?: number;
     isEdit?: boolean;
-    status?: "loading" | "success" | "error" | "omitted" | "partial" | "active" | "complete";
+    status?:
+      | "loading"
+      | "success"
+      | "error"
+      | "omitted"
+      | "partial"
+      | "active"
+      | "complete";
     progressStatus?: "active" | "complete" | "error";
     agentName?: string;
     prompt?: string;
@@ -126,12 +133,15 @@ interface UseStreamEventsOptions {
 
 interface UseStreamEventsReturn {
   messages: StreamingMessage[];
-  sendMessage: (text: string, opts?: {
-    conversationId?: string | null;
-    modelSpec?: string | null;
-    reasoningLevel?: string;
-    channel?: string;
-  }) => void;
+  sendMessage: (
+    text: string,
+    opts?: {
+      conversationId?: string | null;
+      modelSpec?: string | null;
+      reasoningLevel?: string;
+      channel?: string;
+    },
+  ) => void;
   stop: () => void;
   status: "idle" | "submitted" | "streaming" | "error";
   error: Error | null;
@@ -140,7 +150,8 @@ interface UseStreamEventsReturn {
 
 let _partIdCounter = 0;
 function nextId() {
-  const random = globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2);
+  const random =
+    globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2);
   return `part-${++_partIdCounter}-${random}`;
 }
 
@@ -169,6 +180,22 @@ export function useStreamEvents({
   const abortRef = useRef<AbortController | null>(null);
   // Guard against double-start
   const streamingRef = useRef(false);
+
+  // --- rAF batching: accumulate state updates and flush once per frame ---
+  const flushScheduledRef = useRef(false);
+
+  function scheduleFlush() {
+    if (flushScheduledRef.current) return;
+    flushScheduledRef.current = true;
+    requestAnimationFrame(() => {
+      flushScheduledRef.current = false;
+      if (assistantMessageRef.current) {
+        setMessages((prev) =>
+          upsertAssistantMessage(prev, { ...assistantMessageRef.current! }),
+        );
+      }
+    });
+  }
 
   function upsertAssistantMessage(
     prev: StreamingMessage[],
@@ -215,9 +242,10 @@ export function useStreamEvents({
 
     const placeholderId = initialProgressPartIdRef.current;
     if (placeholderId) {
-      assistantMessageRef.current.orderedParts = assistantMessageRef.current.orderedParts.filter(
-        (existing) => existing.id !== placeholderId,
-      );
+      assistantMessageRef.current.orderedParts =
+        assistantMessageRef.current.orderedParts.filter(
+          (existing) => existing.id !== placeholderId,
+        );
       initialProgressPartIdRef.current = null;
     }
 
@@ -231,33 +259,36 @@ export function useStreamEvents({
       }
     }
 
-    setMessages((prev) => upsertAssistantMessage(prev, assistantMessageRef.current!));
+    scheduleFlush();
   }
 
   // ---------------------------------------------------------------------------
   // Update an existing tool call in-place (state transition)
   // ---------------------------------------------------------------------------
-  function updateToolCall(
-    toolCallId: string,
-    partial: Partial<ToolCallEvent>
-  ) {
+  function updateToolCall(toolCallId: string, partial: Partial<ToolCallEvent>) {
     if (!assistantMessageRef.current) return;
     const parts = assistantMessageRef.current.orderedParts;
     const idx = parts.findIndex(
       (p) =>
         p.type.startsWith("tool-call") &&
-        (p as ToolCallEvent).toolCallId === toolCallId
+        (p as ToolCallEvent).toolCallId === toolCallId,
     );
     if (idx !== -1) {
       Object.assign(parts[idx], partial);
       // Update the index too
       if (partial.toolCallId) {
-        toolCallsByIdRef.current.set(partial.toolCallId, parts[idx] as ToolCallEvent);
+        toolCallsByIdRef.current.set(
+          partial.toolCallId,
+          parts[idx] as ToolCallEvent,
+        );
       }
-      setMessages((prev) => {
-        return upsertAssistantMessage(prev, { ...assistantMessageRef.current! });
-      });
-    } else if (partial.toolName || partial.args || partial.result || partial.errorText) {
+      scheduleFlush();
+    } else if (
+      partial.toolName ||
+      partial.args ||
+      partial.result ||
+      partial.errorText
+    ) {
       appendPart({
         id: nextId(),
         toolCallId,
@@ -289,11 +320,7 @@ export function useStreamEvents({
     const lastReasoning = parts[parts.length - 1];
     if (lastReasoning?.type === "reasoning-delta") {
       Object.assign(lastReasoning, part);
-      setMessages((prev) => {
-        return assistantMessageRef.current
-          ? upsertAssistantMessage(prev, { ...assistantMessageRef.current })
-          : prev;
-      });
+      scheduleFlush();
     } else {
       appendPart(part);
     }
@@ -421,7 +448,19 @@ export function useStreamEvents({
           id: nextId(),
           type: "progress",
           text: ev.data.text ?? "",
-          status: ev.data.progressStatus ?? (ev.data.status === "complete" ? "complete" : ev.data.status === "active" ? "active" : ev.data.status === "success" ? "complete" : ev.data.status === "error" ? "error" : ev.data.status === "loading" ? "active" : undefined),
+          status:
+            ev.data.progressStatus ??
+            (ev.data.status === "complete"
+              ? "complete"
+              : ev.data.status === "active"
+                ? "active"
+                : ev.data.status === "success"
+                  ? "complete"
+                  : ev.data.status === "error"
+                    ? "error"
+                    : ev.data.status === "loading"
+                      ? "active"
+                      : undefined),
         } satisfies ProgressEvent);
         break;
 
@@ -436,9 +475,14 @@ export function useStreamEvents({
         break;
 
       case "reference":
-        const referenceStatus = ev.data.status === "loading" || ev.data.status === "success" || ev.data.status === "error" || ev.data.status === "omitted" || ev.data.status === "partial"
-          ? ev.data.status
-          : undefined;
+        const referenceStatus =
+          ev.data.status === "loading" ||
+          ev.data.status === "success" ||
+          ev.data.status === "error" ||
+          ev.data.status === "omitted" ||
+          ev.data.status === "partial"
+            ? ev.data.status
+            : undefined;
         appendPart({
           id: nextId(),
           type: "reference",
@@ -508,7 +552,13 @@ export function useStreamEvents({
           toolCallId: ev.data.toolCallId ?? nextId(),
           agentName: ev.data.agentName,
           text: ev.data.text,
-          status: ev.data.subagentStatus ?? (ev.data.status === "complete" ? "complete" : ev.data.status === "error" ? "error" : "active"),
+          status:
+            ev.data.subagentStatus ??
+            (ev.data.status === "complete"
+              ? "complete"
+              : ev.data.status === "error"
+                ? "error"
+                : "active"),
           runId: ev.data.runId,
           logUrl: ev.data.logUrl,
         } satisfies SubagentEvent);
@@ -520,7 +570,10 @@ export function useStreamEvents({
           type: "subagent-stream-delta",
           toolCallId: ev.data.toolCallId ?? nextId(),
           agentName: ev.data.agentName,
-          kind: ev.data.kind === "reasoning" || ev.data.kind === "tool" ? ev.data.kind : "text",
+          kind:
+            ev.data.kind === "reasoning" || ev.data.kind === "tool"
+              ? ev.data.kind
+              : "text",
           text: ev.data.text ?? "",
         } satisfies SubagentEvent);
         break;
@@ -606,7 +659,9 @@ export function useStreamEvents({
         if (assistantMessageRef.current) {
           assistantMessageRef.current.isComplete = true;
           assistantMessageRef.current.isStreaming = false;
-          setMessages((prev) => upsertAssistantMessage(prev, assistantMessageRef.current!));
+          setMessages((prev) =>
+            upsertAssistantMessage(prev, assistantMessageRef.current!),
+          );
         }
         streamingRef.current = false;
         setStatus("idle");
@@ -625,7 +680,9 @@ export function useStreamEvents({
         modelSpec?: string | null;
         reasoningLevel?: string;
         channel?: string;
-      }
+        /** Image/file attachments to include as structured parts for vision models */
+        attachments?: { url: string; mimeType: string; name: string }[];
+      },
     ) => {
       if (streamingRef.current) return;
 
@@ -648,7 +705,9 @@ export function useStreamEvents({
       const userMsg: StreamingMessage = {
         id: nextId(),
         role: "user",
-        orderedParts: [{ id: nextId(), type: "text-delta", text } satisfies TextDeltaEvent],
+        orderedParts: [
+          { id: nextId(), type: "text-delta", text } satisfies TextDeltaEvent,
+        ],
         isComplete: true,
         isStreaming: false,
       };
@@ -664,11 +723,23 @@ export function useStreamEvents({
       try {
         const res = isRustAgentApi
           ? await (async () => {
+              // For the Rust agent, include file URLs in the prompt
+              let prompt = text;
+              if (opts?.attachments?.length) {
+                const fileLines = opts.attachments
+                  .map(
+                    (a) =>
+                      `[Attached ${a.mimeType.startsWith("image/") ? "Image" : "File"}: ${a.name}](${a.url})`,
+                  )
+                  .join("\n");
+                prompt = prompt ? `${prompt}\n\n${fileLines}` : fileLines;
+              }
               const createRes = await operonFetch("/agent/runs", {
                 method: "POST",
                 body: JSON.stringify({
-                  prompt: text,
-                  conversation_id: opts?.conversationId ?? conversationId ?? null,
+                  prompt,
+                  conversation_id:
+                    opts?.conversationId ?? conversationId ?? null,
                   model: opts?.modelSpec,
                   reasoning_level: opts?.reasoningLevel,
                   channel: opts?.channel,
@@ -680,15 +751,20 @@ export function useStreamEvents({
                 run_id: string;
                 conversation_id: string;
               };
-              const streamRes = await operonFetch(`/agent/runs/${created.run_id}/sse`, {
-                headers: { Accept: "text/event-stream" },
-                signal: abortRef.current?.signal,
-              });
+              const streamRes = await operonFetch(
+                `/agent/runs/${created.run_id}/sse`,
+                {
+                  headers: { Accept: "text/event-stream" },
+                  signal: abortRef.current?.signal,
+                },
+              );
               return new Response(streamRes.body, {
                 status: streamRes.status,
                 statusText: streamRes.statusText,
                 headers: {
-                  "Content-Type": streamRes.headers.get("content-type") ?? "text/event-stream",
+                  "Content-Type":
+                    streamRes.headers.get("content-type") ??
+                    "text/event-stream",
                   "X-Run-Id": created.run_id,
                   "X-Conversation-Id": created.conversation_id,
                 },
@@ -698,7 +774,20 @@ export function useStreamEvents({
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
-                messages: [{ role: "user", parts: [{ type: "text", text }] }],
+                messages: [
+                  {
+                    role: "user",
+                    parts: [
+                      { type: "text", text },
+                      ...(opts?.attachments ?? []).map((a) => ({
+                        type: "file",
+                        mimeType: a.mimeType,
+                        url: a.url,
+                        name: a.name,
+                      })),
+                    ],
+                  },
+                ],
                 conversationId: opts?.conversationId ?? conversationId ?? null,
                 modelSpec: opts?.modelSpec,
                 reasoningLevel: opts?.reasoningLevel,
@@ -715,7 +804,11 @@ export function useStreamEvents({
           throw new Error("Response body is null");
         }
 
-        try { onResponse?.(res); } catch { /* ignore observer errors */ }
+        try {
+          onResponse?.(res);
+        } catch {
+          /* ignore observer errors */
+        }
 
         setStatus("streaming");
 
@@ -760,7 +853,7 @@ export function useStreamEvents({
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps -- handleEvent is defined in hook body and captures only stable refs
-    [api, conversationId, isRustAgentApi, onFinished, onResponse]
+    [api, conversationId, isRustAgentApi, onFinished, onResponse],
   );
 
   // ---------------------------------------------------------------------------
