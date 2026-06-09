@@ -264,9 +264,6 @@ pub(crate) fn provider_base_url(provider: &str) -> &'static str {
 pub struct SseQuery {
     #[serde(default)]
     last_seq: Option<i64>,
-    /// JWT token allowed via query string for EventSource (which can't set headers).
-    #[serde(default)]
-    token: Option<String>,
 }
 
 pub async fn sse_run(
@@ -275,7 +272,7 @@ pub async fn sse_run(
     Query(query): Query<SseQuery>,
     headers: HeaderMap,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, Response> {
-    let user_id = match require_user_with_query(&state, &headers, query.token.as_deref()) {
+    let user_id = match require_user_with_query(&state, &headers) {
         Ok(id) => id,
         Err(err) => return Err(err.into_response()),
     };
@@ -408,11 +405,37 @@ fn to_sse_event(event: crate::agent::types::AgentEvent) -> Event {
 }
 
 fn truncate_title(text: &str) -> String {
-    let trimmed: String = text.chars().take(80).collect();
-    if text.chars().count() > 80 {
-        format!("{trimmed}…")
+    let title = title_from_prompt(text, 80);
+    if title.is_empty() {
+        "New Chat".to_owned()
     } else {
-        trimmed
+        title
+    }
+}
+
+fn title_from_prompt(text: &str, max_chars: usize) -> String {
+    let cleaned = text
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or(text)
+        .trim()
+        .trim_start_matches('#')
+        .trim_start_matches('>')
+        .trim_start_matches('-')
+        .trim_start_matches('*')
+        .trim_matches(|c| matches!(c, '"' | '\'' | '`'))
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    if cleaned.chars().count() <= max_chars {
+        cleaned
+    } else {
+        let prefix: String = cleaned.chars().take(max_chars).collect();
+        match prefix.rfind(' ') {
+            Some(idx) if idx > 0 => format!("{}...", prefix[..idx].trim_end()),
+            _ => format!("{}...", prefix.trim_end()),
+        }
     }
 }
 
@@ -451,14 +474,13 @@ fn workspace_path_for(
 }
 
 fn require_user(state: &AppState, headers: &HeaderMap) -> AppResult<Uuid> {
-    require_user_with_query(state, headers, None)
+    require_user_with_query(state, headers)
 }
 
 fn require_user_with_query(
     state: &AppState,
     headers: &HeaderMap,
-    fallback_token: Option<&str>,
 ) -> AppResult<Uuid> {
-    let token = super::token_from_request(headers, fallback_token).ok_or(AppError::Unauthorized)?;
+    let token = super::token_from_request(headers).ok_or(AppError::Unauthorized)?;
     super::decode_claims_public(state, token)
 }

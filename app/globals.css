@@ -152,6 +152,10 @@
      The band is overlaid on muted-foreground text via background-clip:text;
      it MUST be high-contrast vs the text base or the sweep is invisible. */
     --thinking-shimmer: oklch(0.205 0.015 247);
+
+    /* Reserve vertical space on the streaming assistant message so the
+       page does not jump as text streams in. */
+    --chat-streaming-min-h: 240px;
 }
 
 /* ──────────────────────────────────────────────────────────────
@@ -440,4 +444,16 @@
 [data-chat-streaming="true"] {
     min-height: var(--chat-streaming-min-h, 240px);
     contain: layout style;
+}
+
+/* Stable scrollbar: prevents layout shift when scrollbar appears/disappears
+   during long streaming conversations. */
+.chat-message-list {
+    scrollbar-gutter: stable;
+}
+
+/* Skip rendering work for off-screen old messages to reduce layout cost. */
+.message-row-old {
+    content-visibility: auto;
+    contain-intrinsic-size: 0 72px;
 }

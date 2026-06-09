@@ -15,6 +15,7 @@ pub struct Config {
     pub default_agent_model: String,
     pub workspace_root: PathBuf,
     pub internal_secret: Option<String>,
+    pub jwt_audience: String,
     pub google_client_id: Option<String>,
     pub google_client_secret: Option<String>,
     pub github_client_id: Option<String>,
@@ -65,6 +66,10 @@ impl Config {
             .or_else(|| {
                 cfg!(debug_assertions).then(|| "operon-development-secret".to_owned())
             });
+        let jwt_audience = env::var("OPERON_JWT_AUDIENCE")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "operon".to_owned());
         let google_client_id = env::var("GOOGLE_CLIENT_ID").ok().filter(|v| !v.is_empty());
         let google_client_secret = env::var("GOOGLE_CLIENT_SECRET").ok().filter(|v| !v.is_empty());
         let github_client_id = env::var("GITHUB_CLIENT_ID").ok().filter(|v| !v.is_empty());
@@ -92,6 +97,7 @@ impl Config {
             default_agent_model,
             workspace_root,
             internal_secret,
+            jwt_audience,
             google_client_id,
             google_client_secret,
             github_client_id,

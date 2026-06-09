@@ -1582,7 +1582,7 @@ function ChatPage() {
         {/* ─── Messages ───────────────────────────────────────────── */}
         <div
           ref={messagesContainerRef}
-          className="min-h-0 flex-1 overflow-y-auto overscroll-contain"
+          className="chat-message-list min-h-0 flex-1 overflow-y-auto overscroll-contain"
         >
           <div className="mx-auto max-w-3xl px-4 py-6">
             {messages.length === 0 && !conversationId && (

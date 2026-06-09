@@ -61,7 +61,7 @@ pub struct ConversationDetail {
 }
 
 fn require_user(state: &AppState, headers: &HeaderMap) -> AppResult<Uuid> {
-    let token = super::token_from_request(headers, None).ok_or(AppError::Unauthorized)?;
+    let token = super::token_from_request(headers).ok_or(AppError::Unauthorized)?;
     super::decode_claims_public(state, token)
 }
 

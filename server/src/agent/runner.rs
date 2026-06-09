@@ -1514,30 +1514,28 @@ async fn auto_title_conversation(
 
 /// Simple heuristic title generation from user prompt (no LLM call needed).
 fn generate_title_from_prompt(prompt: &str) -> String {
-    // Take the first line, strip markdown formatting
-    let first_line = prompt
+    let cleaned = prompt
         .lines()
         .find(|l| !l.trim().is_empty())
         .unwrap_or(prompt)
-        .trim();
-
-    // Strip common markdown prefixes
-    let cleaned = first_line
+        .trim()
         .trim_start_matches('#')
         .trim_start_matches('>')
         .trim_start_matches('-')
         .trim_start_matches('*')
-        .trim();
+        .trim_matches(|c| matches!(c, '"' | '\'' | '`'))
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
 
     // Truncate to ~50 chars at a word boundary
-    if cleaned.len() <= 50 {
-        return cleaned.to_string();
+    if cleaned.chars().count() <= 50 {
+        return cleaned;
     }
-    // Find last space before 50 chars
-    let truncated = &cleaned[..50];
+    let truncated: String = cleaned.chars().take(50).collect();
     if let Some(last_space) = truncated.rfind(' ') {
-        format!("{}...", &cleaned[..last_space])
+        format!("{}...", truncated[..last_space].trim_end())
     } else {
-        format!("{}...", truncated)
+        format!("{}...", truncated.trim_end())
     }
 }

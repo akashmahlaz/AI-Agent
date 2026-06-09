@@ -21,7 +21,6 @@ export function MermaidBlock({ code, className }: MermaidBlockProps) {
     async function render() {
       try {
         // Dynamic import to avoid SSR issues and keep bundle small
-        // @ts-expect-error -- mermaid is an optional peer dep, loaded at runtime
         const mermaid = (await import("mermaid")).default;
         mermaid.initialize({
           startOnLoad: false,

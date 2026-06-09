@@ -190,8 +190,12 @@ export function useStreamEvents({
     requestAnimationFrame(() => {
       flushScheduledRef.current = false;
       if (assistantMessageRef.current) {
+        const message = {
+          ...assistantMessageRef.current,
+          orderedParts: [...assistantMessageRef.current.orderedParts],
+        };
         setMessages((prev) =>
-          upsertAssistantMessage(prev, { ...assistantMessageRef.current! }),
+          upsertAssistantMessage(prev, message),
         );
       }
     });
@@ -326,6 +330,22 @@ export function useStreamEvents({
     }
   }
 
+  function appendTextDelta(text: string) {
+    if (!text) return;
+    const parts = assistantMessageRef.current?.orderedParts ?? [];
+    const lastText = parts[parts.length - 1];
+    if (lastText?.type === "text-delta") {
+      (lastText as TextDeltaEvent).text += text;
+      scheduleFlush();
+      return;
+    }
+    appendPart({
+      id: nextId(),
+      type: "text-delta",
+      text,
+    } satisfies TextDeltaEvent);
+  }
+
   // ---------------------------------------------------------------------------
   // Handle a single parsed SSE event
   // ---------------------------------------------------------------------------
@@ -419,11 +439,7 @@ export function useStreamEvents({
         break;
 
       case "text-delta":
-        appendPart({
-          id: nextId(),
-          type: "text-delta",
-          text: ev.data.text ?? "",
-        } satisfies TextDeltaEvent);
+        appendTextDelta(ev.data.text ?? "");
         break;
 
       case "text-end":

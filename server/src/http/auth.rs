@@ -93,6 +93,8 @@ struct GoogleUserInfo {
 struct Claims {
     sub: Uuid,
     email: String,
+    iss: String,
+    aud: String,
     exp: usize,
     iat: usize,
 }
@@ -620,6 +622,8 @@ fn issue_auth_response(
     let claims = Claims {
         sub: user.id,
         email: user.email.clone(),
+        iss: "operon".to_owned(),
+        aud: state.config.jwt_audience.clone(),
         iat: now.timestamp() as usize,
         exp: expires_at.timestamp() as usize,
     };
@@ -653,6 +657,8 @@ fn issue_bearer_token(state: &AppState, user: UserRecord) -> AppResult<AuthRespo
     let claims = Claims {
         sub: user.id,
         email: user.email.clone(),
+        iss: "operon".to_owned(),
+        aud: state.config.jwt_audience.clone(),
         iat: now.timestamp() as usize,
         exp: expires_at.timestamp() as usize,
     };
@@ -682,7 +688,7 @@ fn decode_claims(state: &AppState, token: &str) -> AppResult<Claims> {
 
     let signed_payload = format!("{version}.{claims_part}");
     let expected_signature = sign(&state.config.jwt_secret, signed_payload.as_bytes())?;
-    if expected_signature != signature_part {
+    if !constant_time_eq(expected_signature.as_bytes(), signature_part.as_bytes()) {
         return Err(AppError::Unauthorized);
     }
 
@@ -691,6 +697,12 @@ fn decode_claims(state: &AppState, token: &str) -> AppResult<Claims> {
     let claims: Claims =
         serde_json::from_slice(&claims_bytes).map_err(|_| AppError::Unauthorized)?;
     if claims.exp < Utc::now().timestamp() as usize {
+        return Err(AppError::Unauthorized);
+    }
+    if claims.iss != "operon" {
+        return Err(AppError::Unauthorized);
+    }
+    if claims.aud != state.config.jwt_audience {
         return Err(AppError::Unauthorized);
     }
 
@@ -714,6 +726,8 @@ pub fn mint_service_token(secret: &str, user_id: Uuid, ttl_seconds: i64) -> AppR
     let claims = Claims {
         sub: user_id,
         email: String::new(),
+        iss: "operon".to_owned(),
+        aud: "operon".to_owned(),
         iat: now.timestamp() as usize,
         exp: (now.timestamp() + ttl_seconds) as usize,
     };
@@ -741,15 +755,9 @@ fn parse_token(token: &str) -> AppResult<(&str, &str, &str)> {
     Ok((version, claims, signature))
 }
 
-/// Bearer header → cookie → optional query-string fallback.
-pub fn token_from_request<'a>(
-    headers: &'a HeaderMap,
-    fallback: Option<&'a str>,
-) -> Option<&'a str> {
-    if let Some(token) = token_from_headers(headers) {
-        return Some(token);
-    }
-    fallback.map(|t| t.trim()).filter(|t| !t.is_empty())
+/// Bearer header → cookie (no query-string fallback for security).
+pub fn token_from_request(headers: &HeaderMap) -> Option<&str> {
+    token_from_headers(headers)
 }
 
 /// Verify token + return the user id (`sub` claim).

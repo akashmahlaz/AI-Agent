@@ -60,7 +60,7 @@ pub async fn github_status(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> AppResult<Json<serde_json::Value>> {
-    let token = super::token_from_request(&headers, None).ok_or(AppError::Unauthorized)?;
+    let token = super::token_from_request(&headers).ok_or(AppError::Unauthorized)?;
     let user_id = super::decode_claims_public(&state, token)?;
     let row = sqlx::query(
         "select provider_account_id, scopes, updated_at from oauth_accounts

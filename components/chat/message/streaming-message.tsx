@@ -1591,12 +1591,14 @@ function UserMessage({ text }: { text: string }) {
 function StreamingAssistantMessage({
   message,
   isLoading,
+  isOld,
   onRegenerate,
   onConfirm,
   onRetryTool,
 }: {
   message: StreamingMessage;
   isLoading: boolean;
+  isOld?: boolean;
   onRegenerate?: () => void;
   onConfirm?: (id: string, choice: string) => void;
   onRetryTool?: (ev: ToolCallEvent) => void;
@@ -1606,8 +1608,7 @@ function StreamingAssistantMessage({
   const partsLen = message.orderedParts.length;
   const segments = useMemo(
     () => buildSegments(message.orderedParts),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [partsLen, isStreamingThis],
+    [message.orderedParts, partsLen, isStreamingThis],
   );
   const renderGroups = useMemo(() => groupThinkingRuns(segments), [segments]);
 
@@ -1644,7 +1645,7 @@ function StreamingAssistantMessage({
 
   return (
     <div
-      className="group/msg py-2.5"
+      className={cn("group/msg py-2.5", isOld && "message-row-old")}
       data-chat-streaming={isStreamingThis ? "true" : undefined}
     >
       <WorkingSetHeader events={allToolEvents} />
@@ -1839,12 +1840,14 @@ function MessageToolbar({
 function ChatMessageRow({
   message,
   isLoading,
+  isOld,
   onConfirm,
   onRetryTool,
   onRegenerate,
 }: {
   message: StreamingMessage;
   isLoading: boolean;
+  isOld?: boolean;
   onConfirm?: (id: string, choice: string) => void;
   onRetryTool?: (ev: ToolCallEvent) => void;
   onRegenerate?: () => void;
@@ -1890,6 +1893,7 @@ export function StreamingChatMessageList({
           key={message.id}
           message={message}
           isLoading={isLoading}
+          isOld={idx < messages.length - 3}
           onConfirm={onConfirm}
           onRetryTool={onRetryTool}
           onRegenerate={
