@@ -7,13 +7,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libssl-dev libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Cache dependencies first
+# Cache dependencies by building a dummy project first
 COPY Cargo.toml Cargo.lock ./
-RUN mkdir src && echo "fn main() {}" > src/main.rs
-RUN cargo build --release || true
-RUN rm -rf src
+RUN mkdir src && echo "fn main() { println!(\"dummy\"); }" > src/main.rs
+RUN cargo build --release
+RUN rm -rf src target/release/deps/server* target/release/server*
 
-# Build actual source (remove Windows-specific toolchain file)
+# Build actual source
 COPY . .
 RUN rm -f rust-toolchain.toml
 RUN cargo build --release
