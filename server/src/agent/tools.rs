@@ -11,6 +11,8 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use ignore::WalkBuilder;
+use once_cell::sync::Lazy;
+use regex::Regex;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -23,6 +25,13 @@ use super::github;
 
 const MAX_FILE_BYTES: usize = 1_000_000;
 const DEFAULT_EXEC_TIMEOUT_SECS: u64 = 300;
+
+// Compiled-once regex patterns for HTML stripping (avoids re-compiling on every web_fetch call)
+static RE_SCRIPT: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?is)<script[^>]*>.*?</script>").unwrap());
+static RE_STYLE:  Lazy<Regex> = Lazy::new(|| Regex::new(r"(?is)<style[^>]*>.*?</style>").unwrap());
+static RE_TAGS:   Lazy<Regex> = Lazy::new(|| Regex::new(r"<[^>]+>").unwrap());
+static RE_SPACE:  Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+").unwrap());
+static RE_DDG:    Lazy<Regex> = Lazy::new(|| Regex::new(r#"class="result__a"[^>]*href="([^"]+)"[^>]*>([^<]+)"#).unwrap());
 const MAX_EXEC_OUTPUT_BYTES: usize = 200_000;
 const MAX_LIST_ENTRIES: usize = 500;
 const MAX_SEARCH_RESULTS: usize = 200;
@@ -1264,9 +1273,7 @@ async fn web_search(ctx: &AgentContext, input: &Value) -> Result<Value> {
 
     // Parse results from DDG HTML (simple regex extraction)
     let mut results: Vec<Value> = Vec::new();
-    for cap in regex::Regex::new(r#"class="result__a"[^>]*href="([^"]+)"[^>]*>([^<]+)"#)
-        .unwrap()
-        .captures_iter(&body)
+    for cap in RE_DDG.captures_iter(&body)
     {
         if results.len() >= count as usize {
             break;
@@ -1325,17 +1332,12 @@ async fn web_fetch(ctx: &AgentContext, input: &Value) -> Result<Value> {
     // Strip HTML tags for a readable extraction (simple approach)
     let text = if content_type.contains("html") {
         // Remove script/style blocks, then strip tags
-        let no_scripts = regex::Regex::new(r"(?is)<(script|style)[^>]*>.*?</\1>")
-            .unwrap()
-            .replace_all(&body, "");
-        let no_tags = regex::Regex::new(r"<[^>]+>")
-            .unwrap()
-            .replace_all(&no_scripts, "");
+        let no_scripts = RE_SCRIPT.replace_all(&body, "");
+        let no_scripts = RE_STYLE.replace_all(&no_scripts, "");
+        let no_tags = RE_TAGS.replace_all(&no_scripts, "");
         let decoded = html_escape::decode_html_entities(&no_tags).to_string();
         // Collapse whitespace
-        regex::Regex::new(r"\s+")
-            .unwrap()
-            .replace_all(&decoded, " ")
+        RE_SPACE.replace_all(&decoded, " ")
             .trim()
             .to_string()
     } else {
