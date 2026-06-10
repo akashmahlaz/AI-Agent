@@ -353,18 +353,33 @@ async fn run(spec: RunnerSpec, handle: RunHandle) -> Result<()> {
         const MAX_STEP_CONNECTION_RETRIES: u32 = 3;
         let mut step_connection_retries: u32 = 0;
 
+        // Per-step state that persists across retry attempts but is reset each iteration.
+        // The initial values are placeholders; they get overwritten at the start of each loop.
+        #[allow(unused_assignments)]
         let mut text_started = false;
+        #[allow(unused_assignments)]
         let mut accumulated_text = String::new();
+        #[allow(unused_assignments)]
         let mut accumulated_reasoning = String::new();
+        #[allow(unused_assignments)]
         let mut reasoning_id: Option<String> = None;
+        #[allow(unused_assignments)]
         let mut tool_call_started: Vec<bool> = Vec::new();
+        #[allow(unused_assignments)]
         let mut streamed_tool_info: Vec<(String, String)> = Vec::new();
+        #[allow(unused_assignments)]
         let mut final_tool_calls: Vec<ToolCall> = Vec::new();
+        #[allow(unused_assignments)]
         let mut finish_reason = String::new();
+        #[allow(unused_assignments)]
         let mut usage: Option<(u64, u64, u64)> = None;
+        #[allow(unused_assignments)]
         let mut provider_notices: Vec<Value> = Vec::new();
+        #[allow(unused_assignments)]
         let mut provider_request_id: Option<String> = None;
+        #[allow(unused_assignments)]
         let mut stream_failed: Option<String> = None;
+        #[allow(unused_assignments)]
         let mut stream_interrupted_retriable = false;
 
         'retry_step: loop {

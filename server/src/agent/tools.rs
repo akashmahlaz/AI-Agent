@@ -80,6 +80,7 @@ impl Workspace {
 /// credentials, and database pool so integration tools can resolve API keys
 /// and persist data without a separate network round-trip to Next.js.
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct AgentContext {
     pub workspace: Workspace,
     pub http: Client,
@@ -117,6 +118,7 @@ impl AgentContext {
     /// Resolve an API key for a provider from the user's stored credentials.
     /// Returns the decrypted key, or None if not found (callers should fall back to
     /// the platform-level env var or surface a clear "connect X" error).
+    #[allow(dead_code)]
     pub async fn resolve_api_key(&self, provider: &str) -> Result<Option<String>> {
         use sqlx::Row;
         let row = sqlx::query(
@@ -148,6 +150,7 @@ impl AgentContext {
         Ok(Some(decrypted))
     }
 
+    #[allow(dead_code)]
     fn is_coding(&self) -> bool {
         self.channel == "coding"
     }

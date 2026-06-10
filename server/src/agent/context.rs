@@ -43,6 +43,7 @@ pub fn model_context_limit(provider: &str, model: &str) -> usize {
 }
 
 /// Default max output tokens per provider.
+#[allow(dead_code)]
 pub fn default_max_output_tokens(provider: &str, _model: &str) -> usize {
     match provider {
         "anthropic" => 8_192,
