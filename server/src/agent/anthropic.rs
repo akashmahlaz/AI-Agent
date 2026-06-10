@@ -146,12 +146,20 @@ pub async fn stream_chat(
         .and_then(|message| message.text_content())
         .unwrap_or("");
 
+    tracing::info!(
+        model = %model,
+        messages_count = messages.len(),
+        tools_count = tools.len(),
+        "anthropic_stream_start"
+    );
+
     let mut body = json!({
         "model": model,
         "max_tokens": 8192,
         "stream": true,
         "system": system_text,
         "messages": to_anthropic_messages(messages),
+        "cache_control": {"type": "ephemeral"},
     });
     if !tools.is_empty() {
         body["tools"] = to_anthropic_tools(tools);
@@ -325,12 +333,25 @@ fn parse_anthropic_sse(
 
                 match event_type.as_str() {
                     "message_start" => {
-                        if let Some((input_tokens, output_tokens)) = usage_tokens(data.get("message").and_then(|message| message.get("usage"))) {
-                            yield Ok(OpenAiEvent::Usage {
-                                prompt_tokens: input_tokens,
-                                completion_tokens: output_tokens,
-                                total_tokens: input_tokens + output_tokens,
-                            });
+                        if let Some(usage) = data.get("message").and_then(|message| message.get("usage")) {
+                            let cache_creation = usage.get("cache_creation_input_tokens").and_then(Value::as_u64).unwrap_or(0);
+                            let cache_read = usage.get("cache_read_input_tokens").and_then(Value::as_u64).unwrap_or(0);
+                            let input_tokens = usage.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
+                            if cache_creation > 0 || cache_read > 0 {
+                                tracing::info!(
+                                    cache_read = cache_read,
+                                    cache_write = cache_creation,
+                                    input_tokens = input_tokens,
+                                    "anthropic_cache_usage"
+                                );
+                            }
+                            if let Some((inp, out)) = usage_tokens(Some(usage)) {
+                                yield Ok(OpenAiEvent::Usage {
+                                    prompt_tokens: inp,
+                                    completion_tokens: out,
+                                    total_tokens: inp + out,
+                                });
+                            }
                         }
                     }
                     "content_block_start" => {
@@ -380,12 +401,25 @@ fn parse_anthropic_sse(
                         }
                     }
                     "message_delta" => {
-                        if let Some((input_tokens, output_tokens)) = usage_tokens(data.get("usage")) {
-                            yield Ok(OpenAiEvent::Usage {
-                                prompt_tokens: input_tokens,
-                                completion_tokens: output_tokens,
-                                total_tokens: input_tokens + output_tokens,
-                            });
+                        if let Some(usage) = data.get("usage") {
+                            let cache_creation = usage.get("cache_creation_input_tokens").and_then(Value::as_u64).unwrap_or(0);
+                            let cache_read = usage.get("cache_read_input_tokens").and_then(Value::as_u64).unwrap_or(0);
+                            let input_tokens = usage.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
+                            if cache_creation > 0 || cache_read > 0 {
+                                tracing::info!(
+                                    cache_read = cache_read,
+                                    cache_write = cache_creation,
+                                    input_tokens = input_tokens,
+                                    "anthropic_cache_usage"
+                                );
+                            }
+                            if let Some((inp, out)) = usage_tokens(Some(usage)) {
+                                yield Ok(OpenAiEvent::Usage {
+                                    prompt_tokens: inp,
+                                    completion_tokens: out,
+                                    total_tokens: inp + out,
+                                });
+                            }
                         }
                     }
                     "message_stop" => {

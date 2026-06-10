@@ -30,7 +30,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::{
-    anthropic, events,
+    anthropic, context, events,
     openai::{self, ChatMessage, OpenAiEvent, ToolCall, ToolCallFunction},
     prompt::build_system_message,
     tools::{self, AgentContext, Workspace},
@@ -310,6 +310,8 @@ async fn run(spec: RunnerSpec, handle: RunHandle) -> Result<()> {
         client.clone(),
         spec.github_token.clone(),
         spec.channel.clone(),
+        spec.user_id,
+        spec.db.clone(),
     );
 
     let mut messages: Vec<ChatMessage> = Vec::new();
@@ -384,12 +386,27 @@ async fn run(spec: RunnerSpec, handle: RunHandle) -> Result<()> {
 
         let tool_definitions = provider_tool_definitions(&spec.provider, &spec.channel);
 
+        // Apply automatic context windowing — transparent to user.
+        // The UI shows all messages; the model receives a sliding window with
+        // a heuristic summary of older turns if the budget is exceeded.
+        let system_prompt = build_system_message(&spec.workspace, &spec.channel);
+        let system_tokens = context::estimate_system_tokens(&system_prompt);
+        let tool_tokens = context::estimate_tools_tokens(&tool_definitions);
+        let windowed_messages = context::prepare_context(
+            &messages,
+            system_tokens,
+            tool_tokens,
+            &spec.provider,
+            &spec.model,
+        );
+
         tracing::info!(
             run_id = %spec.run_id,
             step = _step,
             provider = %spec.provider,
             model = %spec.model,
             messages_count = messages.len(),
+            windowed_count = windowed_messages.len(),
             tools_count = tool_definitions.len(),
             retry_attempt = step_connection_retries,
             "llm_request_start"
@@ -400,7 +417,7 @@ async fn run(spec: RunnerSpec, handle: RunHandle) -> Result<()> {
                 &client,
                 &spec.openai_api_key,
                 &spec.model,
-                &messages,
+                &windowed_messages,
                 &tool_definitions,
                 spec.reasoning_level.as_deref(),
             )
@@ -412,7 +429,7 @@ async fn run(spec: RunnerSpec, handle: RunHandle) -> Result<()> {
                 &spec.openai_api_key,
                 &spec.base_url,
                 &spec.model,
-                &messages,
+                &windowed_messages,
                 &tool_definitions,
                 spec.reasoning_level.as_deref(),
             )

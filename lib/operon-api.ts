@@ -1,7 +1,8 @@
 "use client";
 
 export const OPERON_API_URL =
-  process.env.NEXT_PUBLIC_OPERON_API_URL?.replace(/\/$/, "") ?? "http://127.0.0.1:8080";
+  process.env.NEXT_PUBLIC_OPERON_API_URL?.replace(/\/$/, "") ??
+  "http://127.0.0.1:8080";
 
 const TOKEN_KEY = "operon_access_token";
 const EXPIRES_KEY = "operon_access_token_expires_at";
@@ -59,38 +60,81 @@ export function clearOperonSession() {
   window.dispatchEvent(new Event("operon-auth-change"));
 }
 
-export async function operonFetch(path: string, init: RequestInit = {}) {
-  const headers = new Headers(init.headers);
+/**
+ * Deep API logging wrapper.
+ * In development: logs every request + response with timing + status + body preview.
+ * In production: no logging to keep console clean.
+ */
+export async function operonFetch(
+  path: string,
+  init: RequestInit = {},
+): Promise<Response> {
+  const start = Date.now();
+  const method = (init.method ?? "GET").toUpperCase();
+  const isMutation = method !== "GET" && method !== "HEAD";
+
+  // Deep log outgoing request
+  if (process.env.NODE_ENV === "development") {
+    const bodyPreview =
+      isMutation && init.body != null
+        ? ` ${typeof init.body === "string" ? init.body.slice(0, 120) : "[FormData]"}`
+        : "";
+    console.debug(`[api] --> ${method} ${path}${bodyPreview}`);
+  }
+
+  const headers = new Headers(init.headers as HeadersInit);
   const token = operonToken();
   if (token) headers.set("Authorization", `Bearer ${token}`);
-  if (init.body && !headers.has("Content-Type") && !(init.body instanceof FormData)) {
+  if (
+    init.body &&
+    !headers.has("Content-Type") &&
+    !(init.body instanceof FormData)
+  ) {
     headers.set("Content-Type", "application/json");
   }
+
   const res = await fetch(`${OPERON_API_URL}${path}`, {
     ...init,
     headers,
   });
-  // If the backend rejects our token (e.g. server restarted with a new
-  // secret, or token expired), clear the local session and bounce to /login
-  // exactly once. Any in-flight pollers will stop on the redirect.
+
+  const elapsed = Date.now() - start;
+
+  // Deep log response
+  if (process.env.NODE_ENV === "development") {
+    console.debug(`[api] <-- ${res.status} ${method} ${path} (${elapsed}ms)`);
+  }
+
+  // 401 → clear session + redirect to login
   if (res.status === 401 && typeof window !== "undefined") {
     if (operonToken()) {
       clearOperonSession();
-      // Avoid redirect loops while already on auth pages.
-      const path = window.location.pathname;
-      if (!path.startsWith("/login") && !path.startsWith("/signup")) {
-        const next = encodeURIComponent(path + window.location.search);
+      const currentPath = window.location.pathname;
+      if (
+        !currentPath.startsWith("/login") &&
+        !currentPath.startsWith("/signup")
+      ) {
+        const next = encodeURIComponent(currentPath + window.location.search);
         window.location.replace(`/login?next=${next}`);
       }
     }
   }
+
   return res;
 }
 
-export async function operonJson<T>(path: string, init: RequestInit = {}): Promise<T> {
+/** JSON variant — throws on non-2xx with the response body as error message. */
+export async function operonJson<T>(
+  path: string,
+  init: RequestInit = {},
+): Promise<T> {
   const res = await operonFetch(path, init);
   if (!res.ok) {
-    throw new Error(`Rust API ${res.status}: ${await res.text()}`);
+    const body = await res.text().catch(() => "");
+    if (process.env.NODE_ENV === "development") {
+      console.error(`[api] ERROR ${res.status} ${path}: ${body.slice(0, 300)}`);
+    }
+    throw new Error(`Rust API ${res.status}: ${body}`);
   }
   return (await res.json()) as T;
 }
@@ -104,7 +148,11 @@ export async function operonLogin(email: string, password: string) {
   return auth;
 }
 
-export async function operonSignup(displayName: string, email: string, password: string) {
+export async function operonSignup(
+  displayName: string,
+  email: string,
+  password: string,
+) {
   const auth = await operonJson<OperonAuthResponse>("/auth/signup", {
     method: "POST",
     body: JSON.stringify({ display_name: displayName, email, password }),

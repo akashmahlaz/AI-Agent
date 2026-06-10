@@ -15,7 +15,9 @@ use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use similar::TextDiff;
+use sqlx::{Pool, Postgres};
 use tokio::{io::AsyncReadExt, process::Command, time::timeout};
+use uuid::Uuid;
 
 use super::github;
 
@@ -74,8 +76,9 @@ impl Workspace {
     }
 }
 
-/// Per-run context handed to every tool dispatch. Carries the workspace plus
-/// any opt-in credentials the user has connected (GitHub, etc.).
+/// Per-run context handed to every tool dispatch. Carries the workspace,
+/// credentials, and database pool so integration tools can resolve API keys
+/// and persist data without a separate network round-trip to Next.js.
 #[derive(Clone)]
 pub struct AgentContext {
     pub workspace: Workspace,
@@ -85,6 +88,11 @@ pub struct AgentContext {
     /// Local-fs / shell tools (`exec`, `write_file`, `apply_patch`) are only
     /// dispatched in `coding`. Web mode must use the GitHub API tools instead.
     pub channel: String,
+    /// Authenticated user ID (from JWT).
+    pub user_id: Uuid,
+    /// Shared database pool (Postgres/SQLx). Used by integration tools to
+    /// resolve credentials and persist data.
+    pub db: Pool<Postgres>,
 }
 
 impl AgentContext {
@@ -93,13 +101,51 @@ impl AgentContext {
         http: Client,
         github_token: Option<String>,
         channel: String,
+        user_id: Uuid,
+        db: Pool<Postgres>,
     ) -> Self {
         Self {
             workspace,
             http,
             github_token,
             channel,
+            user_id,
+            db,
         }
+    }
+
+    /// Resolve an API key for a provider from the user's stored credentials.
+    /// Returns the decrypted key, or None if not found (callers should fall back to
+    /// the platform-level env var or surface a clear "connect X" error).
+    pub async fn resolve_api_key(&self, provider: &str) -> Result<Option<String>> {
+        use sqlx::Row;
+        let row = sqlx::query(
+            r#"
+            select encrypted_api_key, encrypted_oauth_token
+            from auth_profiles
+            where user_id = $1 and provider = $2
+            order by updated_at desc limit 1
+            "#,
+        )
+        .bind(self.user_id)
+        .bind(provider)
+        .fetch_optional(&self.db)
+        .await?;
+
+        let encrypted = match row {
+            Some(r) => r
+                .try_get::<Option<String>, _>("encrypted_api_key")?
+                .or_else(|| r.try_get::<Option<String>, _>("encrypted_oauth_token").ok().flatten()),
+            None => return Ok(None),
+        };
+        let encrypted = match encrypted {
+            Some(e) if !e.is_empty() => e,
+            _ => return Ok(None),
+        };
+        // v1:iv:tag:ciphertext format (AES-256-GCM)
+        let decrypted = crate::tools::decrypt_token(&encrypted)
+            .map_err(|e| anyhow!("decrypt token: {}", e))?;
+        Ok(Some(decrypted))
     }
 
     fn is_coding(&self) -> bool {

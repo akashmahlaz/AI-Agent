@@ -22,6 +22,7 @@ import type {
   StreamErrorEvent,
 } from "./types";
 import { operonFetch } from "@/lib/operon-api";
+import { TypewriterBuffer } from "./typewriter-buffer";
 
 // ---------------------------------------------------------------------------
 // SSE event shape emitted by the Rust agent backend.
@@ -181,6 +182,8 @@ export function useStreamEvents({
   const abortRef = useRef<AbortController | null>(null);
   // Guard against double-start
   const streamingRef = useRef(false);
+  // Typewriter buffer for smooth text rendering (especially for Anthropic's large chunks)
+  const typewriterRef = useRef<TypewriterBuffer | null>(null);
 
   // --- rAF batching: accumulate state updates and flush once per frame ---
   const flushScheduledRef = useRef(false);
@@ -465,10 +468,20 @@ export function useStreamEvents({
         break;
 
       case "text-delta":
-        appendTextDelta(ev.data.text ?? "");
+        // Route through typewriter buffer for smooth rendering.
+        // For providers with naturally small chunks (OpenAI), the buffer drains
+        // quickly; for providers with large chunks (Anthropic), it smooths the
+        // appearance to ~3 chars/frame.
+        if (typewriterRef.current) {
+          typewriterRef.current.push(ev.data.text ?? "");
+        } else {
+          appendTextDelta(ev.data.text ?? "");
+        }
         break;
 
       case "text-end":
+        // Flush any pending text before marking text-end
+        typewriterRef.current?.flush();
         appendPart({
           id: nextId(),
           type: "text-end",
@@ -678,6 +691,10 @@ export function useStreamEvents({
       }
 
       case "message-end":
+        // Flush and destroy typewriter buffer
+        typewriterRef.current?.flush();
+        typewriterRef.current?.destroy();
+        typewriterRef.current = null;
         if (assistantMessageRef.current) {
           assistantMessageRef.current.isComplete = true;
           assistantMessageRef.current.isStreaming = false;
@@ -698,6 +715,10 @@ export function useStreamEvents({
       case "run-completed":
       case "run-failed":
       case "run-cancelled":
+        // Flush and destroy typewriter buffer
+        typewriterRef.current?.flush();
+        typewriterRef.current?.destroy();
+        typewriterRef.current = null;
         if (assistantMessageRef.current) {
           assistantMessageRef.current.isComplete = true;
           assistantMessageRef.current.isStreaming = false;
@@ -726,9 +747,32 @@ export function useStreamEvents({
         attachments?: { url: string; mimeType: string; name: string }[];
       },
     ) => {
-      if (streamingRef.current) return;
+      // ── Steer: user sent a message while AI was still working ──────────────────────
+      // VS Code Copilot pattern: cancel current → freeze partial → new request.
+      const isSteer = streamingRef.current;
+      let steerFrozenAssistant: StreamingMessage | null = null;
+      if (isSteer) {
+        // Cancel the in-flight stream
+        abortRef.current?.abort();
+        abortRef.current = new AbortController();
 
-      // Cancel any in-flight request
+        // Flush and destroy the typewriter buffer
+        typewriterRef.current?.flush();
+        typewriterRef.current?.destroy();
+        typewriterRef.current = null;
+
+        // Freeze the current partial assistant response as complete
+        if (assistantMessageRef.current) {
+          assistantMessageRef.current.isComplete = true;
+          assistantMessageRef.current.isStreaming = false;
+          steerFrozenAssistant = assistantMessageRef.current;
+        }
+
+        // Reset streaming flag to allow the new request to proceed
+        streamingRef.current = false;
+      }
+
+      // Cancel any in-flight request (for non-steer, this is a no-op since already cancelled above)
       abortRef.current?.abort();
       abortRef.current = new AbortController();
 
@@ -741,9 +785,12 @@ export function useStreamEvents({
       initialProgressPartIdRef.current = null;
       setStatus("submitted");
 
-      // Append user message immediately, plus an empty assistant placeholder
-      // so the StreamingAssistantMessage's built-in "Working…" indicator can
-      // render alone (no duplicate progress row).
+      // Initialize typewriter buffer for smooth text rendering (3 chars/frame for Anthropic)
+      typewriterRef.current = new TypewriterBuffer((chunk) => {
+        appendTextDelta(chunk);
+      }, 3);
+
+      // Build the user message — either the steer message (if steering) or the new message
       const userMsg: StreamingMessage = {
         id: nextId(),
         role: "user",
@@ -753,6 +800,7 @@ export function useStreamEvents({
         isComplete: true,
         isStreaming: false,
       };
+
       assistantMessageRef.current = {
         id: nextId(),
         role: "assistant",
@@ -760,7 +808,17 @@ export function useStreamEvents({
         isComplete: false,
         isStreaming: true,
       };
-      setMessages((prev) => [...prev, userMsg, assistantMessageRef.current!]);
+
+      // Build the messages array: if steering, include the frozen partial assistant
+      // between the steer user message and the new assistant placeholder
+      setMessages((prev) => {
+        if (isSteer && steerFrozenAssistant) {
+          // Freeze old partial + steer message + new placeholder
+          const frozen = { ...steerFrozenAssistant };
+          return [...prev, frozen, userMsg, assistantMessageRef.current!];
+        }
+        return [...prev, userMsg, assistantMessageRef.current!];
+      });
 
       try {
         const res = isRustAgentApi
@@ -893,6 +951,10 @@ export function useStreamEvents({
           setStatus("error");
         }
       } finally {
+        // Flush and destroy typewriter buffer
+        typewriterRef.current?.flush();
+        typewriterRef.current?.destroy();
+        typewriterRef.current = null;
         // If we exit the stream loop but the assistant message is still
         // in "streaming" state (no message-end received), mark it complete
         // to prevent stuck loading UI.

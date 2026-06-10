@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { builtInSkills } from "@/lib/skills";
-import { operonToken } from "@/lib/operon-api";
+import { operonFetch } from "@/lib/operon-api";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { Brain, Sparkles, Wrench } from "lucide-react";
@@ -27,11 +27,10 @@ export default function SkillsPage() {
 
   useEffect(() => {
     let cancelled = false;
-    const token = operonToken();
-    fetch("/api/agent-skills", {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-    })
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+    operonFetch("/agent-skills")
+      .then((r) =>
+        r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)),
+      )
       .then((data) => {
         if (!cancelled) setAgentSkills((data.skills as AgentSkill[]) ?? []);
       })
@@ -47,7 +46,9 @@ export default function SkillsPage() {
     <div className="flex-1 overflow-y-auto">
       <div className="mx-auto max-w-3xl space-y-8 p-6">
         <header>
-          <h1 className="font-heading text-2xl font-bold tracking-tight">Skills</h1>
+          <h1 className="font-heading text-2xl font-bold tracking-tight">
+            Skills
+          </h1>
           <p className="mt-0.5 text-sm text-muted-foreground">
             Tools and learned recipes your agent can call
           </p>
@@ -56,12 +57,17 @@ export default function SkillsPage() {
         <section>
           <div className="mb-3 flex items-center gap-2">
             <Brain className="h-4 w-4 text-primary" />
-            <h2 className="text-sm font-semibold">Agent skills (procedural memory)</h2>
-            <Badge variant="outline" className="text-[10px]">Hermes-style</Badge>
+            <h2 className="text-sm font-semibold">
+              Agent skills (procedural memory)
+            </h2>
+            <Badge variant="outline" className="text-[10px]">
+              Hermes-style
+            </Badge>
           </div>
           <p className="mb-3 text-xs text-muted-foreground">
-            Multi-step recipes the agent saves after a successful run, then recalls when you ask
-            for something similar. The more you use them, the more reliable they become.
+            Multi-step recipes the agent saves after a successful run, then
+            recalls when you ask for something similar. The more you use them,
+            the more reliable they become.
           </p>
 
           {error ? (
@@ -78,8 +84,9 @@ export default function SkillsPage() {
               <div>
                 <p className="text-sm font-medium">No saved skills yet</p>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  After the agent successfully completes a multi-step workflow it will offer to
-                  save it as a reusable skill. They will appear here.
+                  After the agent successfully completes a multi-step workflow
+                  it will offer to save it as a reusable skill. They will appear
+                  here.
                 </p>
               </div>
             </div>
@@ -87,27 +94,43 @@ export default function SkillsPage() {
             <div className="grid grid-cols-1 gap-3">
               {agentSkills.map((s) => {
                 const total = s.successCount + s.failureCount;
-                const successRate = total > 0 ? Math.round((s.successCount / total) * 100) : null;
+                const successRate =
+                  total > 0 ? Math.round((s.successCount / total) * 100) : null;
                 return (
-                  <div key={s.id} className="rounded-2xl border border-border bg-card p-4">
+                  <div
+                    key={s.id}
+                    className="rounded-2xl border border-border bg-card p-4"
+                  >
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
                           <p className="font-medium">{s.name}</p>
                           <Badge variant="outline" className="text-[10px]">
-                            {s.steps.length} step{s.steps.length === 1 ? "" : "s"}
+                            {s.steps.length} step
+                            {s.steps.length === 1 ? "" : "s"}
                           </Badge>
                           {s.tags?.slice(0, 4).map((tag) => (
-                            <Badge key={tag} variant="secondary" className="text-[10px]">
+                            <Badge
+                              key={tag}
+                              variant="secondary"
+                              className="text-[10px]"
+                            >
                               {tag}
                             </Badge>
                           ))}
                         </div>
-                        <p className="mt-1 text-sm text-muted-foreground">{s.description}</p>
+                        <p className="mt-1 text-sm text-muted-foreground">
+                          {s.description}
+                        </p>
                       </div>
                       <div className="shrink-0 text-right text-[11px] text-muted-foreground">
-                        <div>{s.invocationCount} run{s.invocationCount === 1 ? "" : "s"}</div>
-                        {successRate !== null && <div>{successRate}% success</div>}
+                        <div>
+                          {s.invocationCount} run
+                          {s.invocationCount === 1 ? "" : "s"}
+                        </div>
+                        {successRate !== null && (
+                          <div>{successRate}% success</div>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -134,11 +157,16 @@ export default function SkillsPage() {
                     <Badge variant="outline" className="font-mono text-[10px]">
                       {s.slug}
                     </Badge>
-                    <Badge variant="secondary" className="text-[10px] capitalize">
+                    <Badge
+                      variant="secondary"
+                      className="text-[10px] capitalize"
+                    >
                       {s.category}
                     </Badge>
                   </div>
-                  <p className="mt-1 text-sm text-muted-foreground">{s.description}</p>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    {s.description}
+                  </p>
                 </div>
                 <Switch defaultChecked={s.enabled} />
               </div>

@@ -859,7 +859,9 @@ function ChatPage() {
     ? conversations.filter(
         (c) =>
           c.title?.toLowerCase().includes(deferredSearchQuery.toLowerCase()) ||
-          c.lastMessage?.toLowerCase().includes(deferredSearchQuery.toLowerCase()),
+          c.lastMessage
+            ?.toLowerCase()
+            .includes(deferredSearchQuery.toLowerCase()),
       )
     : conversations;
 
@@ -1692,7 +1694,11 @@ function ChatPage() {
               />
             </ChatErrorBoundary>
 
-            <div ref={messagesEndRef} className="h-px" aria-hidden="true" />
+            <div
+              ref={messagesEndRef}
+              className="scroll-anchor"
+              aria-hidden="true"
+            />
           </div>
         </div>
 

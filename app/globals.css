@@ -471,6 +471,27 @@
    during long streaming conversations. */
 .chat-message-list {
     scrollbar-gutter: stable;
+    /* Prevent browser scroll anchoring from fighting our JS scroll management.
+       We handle scroll anchoring manually via the scroll-anchor sentinel below. */
+    overflow-anchor: none;
+    overscroll-behavior: contain;
+}
+
+/* Scroll anchor sentinel: pins the scroll position to the bottom during streaming.
+   When new content arrives above, the browser anchors to this element instead of
+   jumping around. Used with scrollIntoView({ behavior: 'instant' } in the hook. */
+.scroll-anchor {
+    overflow-anchor: auto;
+    height: 0;
+    min-height: 0;
+    /* Ensure the anchor doesn't affect layout */
+    flex-shrink: 0;
+}
+
+/* Streaming message: isolate reflow to just the bubble, prevent it from
+   pushing around the composer or status bar during fast text updates. */
+.streaming-message {
+    contain: layout style;
 }
 
 /* Skip rendering work for off-screen old messages to reduce layout cost. */

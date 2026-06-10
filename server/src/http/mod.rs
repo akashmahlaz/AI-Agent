@@ -1,5 +1,6 @@
 mod admin;
 mod agent;
+mod agent_skills;
 mod auth;
 mod codex;
 mod conversations;
@@ -7,6 +8,7 @@ mod error;
 mod health;
 mod integrations;
 mod logs;
+mod meta;
 mod settings;
 mod uploads;
 
@@ -46,6 +48,12 @@ pub fn router(state: AppState) -> Router {
         .route("/agent/conversations/{id}/messages", post(conversations::append_message))
         .route("/agent/conversations/{id}/compact", post(conversations::compact_conversation))
         .route("/agent/conversations/{id}/confirm", post(conversations::confirm_action))
+        .route("/agent-skills", get(agent_skills::list_agent_skills))
+        .route("/meta/status", get(meta::status))
+        .route("/meta/connect", post(meta::connect))
+        .route("/meta/campaigns", get(meta::campaigns))
+        .route("/meta/insights", get(meta::insights))
+        .route("/meta/campaign-action", post(meta::campaign_action))
         .route("/integrations/whatsapp/status", get(integrations::whatsapp_status))
         .route("/integrations/telegram/status", get(integrations::telegram_status))
         .route("/integrations/github/status", get(integrations::github_status))

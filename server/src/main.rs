@@ -4,6 +4,7 @@ mod config;
 mod db;
 mod http;
 mod state;
+mod tools;
 
 use std::{io, net::SocketAddr};
 
