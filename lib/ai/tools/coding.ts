@@ -11,8 +11,7 @@ import {
   WorkspaceError,
   writeWorkspaceFile,
 } from "@/lib/services/coding-workspace";
-import { collections } from "@/lib/db-collections";
-import type { Document } from "mongodb";
+import sql from "@/lib/pg";
 import { appendLog } from "@/lib/services/logs";
 
 interface CodingPlanItem {
@@ -22,14 +21,36 @@ interface CodingPlanItem {
   notes?: string;
 }
 
-interface StoredCodingPlan extends Document {
-  _id: string; // conversationId
+interface CodingPlanRow {
+  conversationId: string;
   userId: string;
-  items: CodingPlanItem[];
-  updatedAt: string;
+  plan: { items?: CodingPlanItem[] } | null;
+  updatedAt: Date;
 }
 
-const codingPlans = () => collections.collection<StoredCodingPlan>("coding_plans");
+async function readCodingPlan(conversationId: string): Promise<CodingPlanItem[]> {
+  const [row] = await sql<CodingPlanRow[]>`
+    select conversation_id, user_id, plan, updated_at
+    from coding_plans
+    where conversation_id = ${conversationId}
+    limit 1
+  `;
+  return row?.plan?.items ?? [];
+}
+
+async function writeCodingPlan(
+  userId: string,
+  conversationId: string,
+  items: CodingPlanItem[],
+) {
+  await sql`
+    insert into coding_plans (id, conversation_id, user_id, plan)
+    values (${crypto.randomUUID()}, ${conversationId}, ${userId}, ${sql.json({ items } as never)})
+    on conflict (conversation_id) do update set
+      plan       = excluded.plan,
+      updated_at = now()
+  `;
+}
 
 function badResult(error: unknown) {
   const message = error instanceof WorkspaceError || error instanceof Error
@@ -245,11 +266,7 @@ export function createCodingTools(userId: string, conversationId: string | null)
             text,
             status: idx === 0 ? "in_progress" : "pending",
           }));
-          await codingPlans().updateOne(
-            { _id: cid },
-            { $set: { _id: cid, userId, items: plan, updatedAt: new Date().toISOString() } },
-            { upsert: true },
-          );
+          await writeCodingPlan(userId, cid, plan);
           logToolUse(userId, cid, "coding_plan_set", { count: plan.length });
           return { ok: true, items: plan };
         } catch (e) {
@@ -269,15 +286,14 @@ export function createCodingTools(userId: string, conversationId: string | null)
       execute: async ({ id, status, notes }) => {
         try {
           const cid = requireConversation();
-          const plan = await codingPlans().findOne({ _id: cid });
-          if (!plan) return { ok: false, error: "no plan set yet — call coding_plan_set first" };
-          const items = plan.items.map((item) =>
+          const existing = await readCodingPlan(cid);
+          if (existing.length === 0) {
+            return { ok: false, error: "no plan set yet — call coding_plan_set first" };
+          }
+          const items = existing.map((item) =>
             item.id === id ? { ...item, status, notes: notes ?? item.notes } : item,
           );
-          await codingPlans().updateOne(
-            { _id: cid },
-            { $set: { items, updatedAt: new Date().toISOString() } },
-          );
+          await writeCodingPlan(userId, cid, items);
           logToolUse(userId, cid, "coding_plan_update", { id, status });
           return { ok: true, items };
         } catch (e) {
@@ -292,8 +308,8 @@ export function createCodingTools(userId: string, conversationId: string | null)
       execute: async () => {
         try {
           const cid = requireConversation();
-          const plan = await codingPlans().findOne({ _id: cid });
-          return { ok: true, items: plan?.items ?? [] };
+          const items = await readCodingPlan(cid);
+          return { ok: true, items };
         } catch (e) {
           return badResult(e);
         }

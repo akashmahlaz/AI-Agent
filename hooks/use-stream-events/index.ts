@@ -140,6 +140,7 @@ interface UseStreamEventsReturn {
       modelSpec?: string | null;
       reasoningLevel?: string;
       channel?: string;
+      attachments?: { url: string; mimeType: string; name: string }[];
     },
   ) => void;
   stop: () => void;
@@ -739,26 +740,29 @@ export function useStreamEvents({
       try {
         const res = isRustAgentApi
           ? await (async () => {
-              // For the Rust agent, include file URLs in the prompt
-              let prompt = text;
-              if (opts?.attachments?.length) {
-                const fileLines = opts.attachments
-                  .map(
-                    (a) =>
-                      `[Attached ${a.mimeType.startsWith("image/") ? "Image" : "File"}: ${a.name}](${a.url})`,
-                  )
-                  .join("\n");
-                prompt = prompt ? `${prompt}\n\n${fileLines}` : fileLines;
-              }
+              // Forward attachments as a structured field so the Rust runner
+              // can build provider-native vision content blocks
+              // (OpenAI `image_url`, Anthropic `image` with URL source).
+              // We DO NOT also splice them into the prompt text here — the
+              // chat composer is responsible for any user-visible markdown
+              // it wants to show in the user bubble (e.g. ![](url) image
+              // previews), and double-injection would just waste tokens.
               const createRes = await operonFetch("/agent/runs", {
                 method: "POST",
                 body: JSON.stringify({
-                  prompt,
+                  prompt: text,
                   conversation_id:
                     opts?.conversationId ?? conversationId ?? null,
                   model: opts?.modelSpec,
                   reasoning_level: opts?.reasoningLevel,
                   channel: opts?.channel,
+                  attachments: opts?.attachments?.length
+                    ? opts.attachments.map((a) => ({
+                        url: a.url,
+                        mime_type: a.mimeType,
+                        name: a.name,
+                      }))
+                    : undefined,
                 }),
                 signal: abortRef.current?.signal,
               });

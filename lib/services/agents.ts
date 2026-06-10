@@ -1,54 +1,84 @@
-import { collections } from "@/lib/db-collections";
+import sql from "@/lib/pg";
 import type { Agent } from "@/lib/types";
-import type { Document } from "mongodb";
 
-export interface StoredAgent extends Document, Agent {
-  _id: string;
+export interface StoredAgent extends Agent {
   userId: string;
-  createdAt: string;
   updatedAt: string;
 }
 
-const agents = () => collections.agents<StoredAgent>();
+interface AgentRow {
+  id: string;
+  userId: string;
+  name: string;
+  description: string;
+  systemPrompt: string;
+  tools: string[];
+  enabled: boolean;
+  createdAt: Date;
+  updatedAt: Date;
+}
 
-let indexesReady: Promise<void> | null = null;
-
-function ensureIndexes() {
-  indexesReady ??= Promise.all([
-    agents().createIndex({ userId: 1, createdAt: -1 }),
-    agents().createIndex({ userId: 1, enabled: 1 }),
-  ]).then(() => undefined);
-  return indexesReady;
+function fromRow(row: AgentRow): StoredAgent {
+  return {
+    id: row.id,
+    userId: row.userId,
+    name: row.name,
+    description: row.description,
+    systemPrompt: row.systemPrompt,
+    tools: row.tools ?? [],
+    enabled: row.enabled,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
 }
 
 export async function listAgents(userId: string) {
-  await ensureIndexes();
-  return agents().find({ userId }).sort({ createdAt: -1 }).toArray();
+  const rows = await sql<AgentRow[]>`
+    select id, user_id, name, description, system_prompt, tools, enabled, created_at, updated_at
+    from agents
+    where user_id = ${userId}
+    order by created_at desc
+  `;
+  return rows.map(fromRow);
 }
 
-export async function createAgent(userId: string, input: Omit<Agent, "id">) {
-  await ensureIndexes();
-  const createdAt = new Date().toISOString();
-  const document: StoredAgent = {
-    _id: crypto.randomUUID(),
-    id: crypto.randomUUID(),
-    userId,
-    ...input,
-    createdAt,
-    updatedAt: createdAt,
-  };
-  document.id = document._id;
-  await agents().insertOne(document);
-  return document;
+export async function createAgent(userId: string, input: Omit<Agent, "id" | "createdAt">) {
+  const id = crypto.randomUUID();
+  const [row] = await sql<AgentRow[]>`
+    insert into agents (id, user_id, name, description, system_prompt, tools, enabled)
+    values (
+      ${id},
+      ${userId},
+      ${input.name},
+      ${input.description ?? ""},
+      ${input.systemPrompt ?? ""},
+      ${input.tools ?? []},
+      ${input.enabled !== false}
+    )
+    returning id, user_id, name, description, system_prompt, tools, enabled, created_at, updated_at
+  `;
+  return fromRow(row);
 }
 
 export async function updateAgent(userId: string, id: string, patch: Partial<Omit<Agent, "id">>) {
-  await ensureIndexes();
-  await agents().updateOne({ userId, _id: id }, { $set: { ...patch, updatedAt: new Date().toISOString() } });
-  return agents().findOne({ userId, _id: id });
+  const [row] = await sql<AgentRow[]>`
+    update agents
+    set
+      name          = coalesce(${patch.name ?? null}, name),
+      description   = coalesce(${patch.description ?? null}, description),
+      system_prompt = coalesce(${patch.systemPrompt ?? null}, system_prompt),
+      tools         = coalesce(${patch.tools ?? null}::text[], tools),
+      enabled       = coalesce(${patch.enabled ?? null}::boolean, enabled),
+      updated_at    = now()
+    where user_id = ${userId} and id = ${id}
+    returning id, user_id, name, description, system_prompt, tools, enabled, created_at, updated_at
+  `;
+  return row ? fromRow(row) : null;
 }
 
 export async function deleteAgent(userId: string, id: string) {
-  await ensureIndexes();
-  return agents().deleteOne({ userId, _id: id });
+  const result = await sql`
+    delete from agents where user_id = ${userId} and id = ${id}
+  `;
+  return { deletedCount: result.count };
 }

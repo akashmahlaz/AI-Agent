@@ -22,7 +22,7 @@ const workspaceFiles = [
   {
     filename: "USER.md",
     description: "Your preferences — how you like to work",
-    content: "# USER\n\nThe user prefers rich, Brilion-style dashboard UI, Mongo-backed production paths, and complete agent follow-through.",
+    content: "# USER\n\nThe user prefers rich, Brilion-style dashboard UI, Postgres-backed production paths, and complete agent follow-through.",
   },
   {
     filename: "HEARTBEAT.md",
@@ -32,7 +32,7 @@ const workspaceFiles = [
   {
     filename: "TOOLS.md",
     description: "Custom tool definitions & API instructions",
-    content: "# TOOLS\n\nUse provider, integration, scheduler, session, log, upload, and channel services through Mongo-backed modules.",
+    content: "# TOOLS\n\nUse provider, integration, scheduler, session, log, upload, and channel services through Postgres-backed modules.",
   },
 ];
 

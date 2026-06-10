@@ -1,11 +1,10 @@
 import { tool } from "ai";
 import type { Tool } from "ai";
 import { z } from "zod";
-import { collections } from "@/lib/db-collections";
+import sql from "@/lib/pg";
 import { appendLog } from "@/lib/services/logs";
-import type { Document } from "mongodb";
 
-export interface McpServer extends Document {
+export interface McpServer {
   id: string;
   userId: string;
   name: string;
@@ -15,37 +14,62 @@ export interface McpServer extends Document {
   updatedAt: string;
 }
 
-const mcpServers = () => collections.mcpServers<McpServer>();
-
-let indexReady: Promise<void> | null = null;
-function ensureIndex() {
-  indexReady ??= mcpServers().createIndex({ userId: 1 }, {}).then(() => undefined);
-  return indexReady;
+interface McpServerRow {
+  id: string;
+  userId: string;
+  name: string;
+  config: { url?: string; enabled?: boolean } | null;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
-export async function listMcpServers(userId: string) {
-  await ensureIndex();
-  return mcpServers().find({ userId }).sort({ createdAt: -1 }).toArray();
+function fromRow(row: McpServerRow): McpServer {
+  const config = row.config ?? {};
+  return {
+    id: row.id,
+    userId: row.userId,
+    name: row.name,
+    url: config.url ?? "",
+    enabled: config.enabled !== false,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
 }
 
-export async function upsertMcpServer(userId: string, server: { id?: string; name: string; url: string; enabled?: boolean }) {
-  await ensureIndex();
-  const now = new Date().toISOString();
+export async function listMcpServers(userId: string): Promise<McpServer[]> {
+  const rows = await sql<McpServerRow[]>`
+    select id, user_id, name, config, created_at, updated_at
+    from mcp_servers
+    where user_id = ${userId}
+    order by created_at desc
+  `;
+  return rows.map(fromRow);
+}
+
+export async function upsertMcpServer(
+  userId: string,
+  server: { id?: string; name: string; url: string; enabled?: boolean },
+) {
   const id = server.id ?? crypto.randomUUID();
-  await mcpServers().updateOne(
-    { userId, id },
-    {
-      $set: { name: server.name.trim(), url: server.url.trim(), enabled: server.enabled !== false, updatedAt: now },
-      $setOnInsert: { _id: id, id, userId, createdAt: now },
-    },
-    { upsert: true },
-  );
-  return mcpServers().findOne({ userId, id });
+  const config = {
+    url: server.url.trim(),
+    enabled: server.enabled !== false,
+  };
+
+  const [row] = await sql<McpServerRow[]>`
+    insert into mcp_servers (id, user_id, name, config)
+    values (${id}, ${userId}, ${server.name.trim()}, ${sql.json(config)})
+    on conflict (id) do update set
+      name       = excluded.name,
+      config     = excluded.config,
+      updated_at = now()
+    returning id, user_id, name, config, created_at, updated_at
+  `;
+  return fromRow(row);
 }
 
 export async function deleteMcpServer(userId: string, id: string) {
-  await ensureIndex();
-  await mcpServers().deleteOne({ userId, id });
+  await sql`delete from mcp_servers where user_id = ${userId} and id = ${id}`;
 }
 
 // MCP JSON-RPC 2.0 over HTTP (streamable HTTP transport)
@@ -103,13 +127,28 @@ export async function getMcpTools(userId: string): Promise<Record<string, Tool<a
           description: toolDef.description ?? toolDef.name,
           inputSchema: z.record(z.string(), z.unknown()),
           execute: async (args: Record<string, unknown>) => {
-            await appendLog({ userId, level: "info", source: "mcp", message: `MCP tool called: ${toolDefName}`, metadata: { server: server.name, tool: toolDefName } });
+            await appendLog({
+              userId,
+              level: "info",
+              source: "mcp",
+              message: `MCP tool called: ${toolDefName}`,
+              metadata: { server: server.name, tool: toolDefName },
+            });
             return mcpRpc(serverUrl, "tools/call", { name: toolDefName, arguments: args });
           },
         });
       }
     } catch (error) {
-      await appendLog({ userId, level: "warn", source: "mcp", message: `MCP server unreachable: ${server.name}`, metadata: { url: server.url, error: error instanceof Error ? error.message : String(error) } });
+      await appendLog({
+        userId,
+        level: "warn",
+        source: "mcp",
+        message: `MCP server unreachable: ${server.name}`,
+        metadata: {
+          url: server.url,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      });
     }
   }
 

@@ -601,8 +601,10 @@ function ChatPage() {
     fileInputRef.current?.click();
   }
 
-  function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
-    const files = Array.from(e.target.files || []);
+  // Single upload pipeline shared by file picker, drag-drop, and clipboard
+  // paste. Validates size, builds the preview blob URL, optimistically pushes
+  // a placeholder chip, then POSTs to /uploads in the background.
+  function uploadFiles(files: File[]) {
     if (!files.length) return;
     for (const file of files) {
       if (file.size > 10 * 1024 * 1024) {
@@ -644,7 +646,21 @@ function ChatPage() {
           toast.error(`Failed to upload ${file.name}`);
         });
     }
+  }
+
+  function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    uploadFiles(Array.from(e.target.files || []));
     e.target.value = "";
+  }
+
+  // Paste-from-clipboard: screenshots, copied files from explorer, etc.
+  // ChatGPT and Claude both support this — it's the fastest way to attach an
+  // image without going through Save → Choose File.
+  function handlePaste(e: React.ClipboardEvent) {
+    const files = Array.from(e.clipboardData.files);
+    if (files.length === 0) return;
+    e.preventDefault();
+    uploadFiles(files);
   }
 
   function removeAttachedFile(file: File) {
@@ -674,49 +690,7 @@ function ChatPage() {
     e.preventDefault();
     e.stopPropagation();
     setDragOver(false);
-    const files = Array.from(e.dataTransfer.files);
-    if (!files.length) return;
-    // Reuse the same upload logic from handleFileChange
-    for (const file of files) {
-      if (file.size > 10 * 1024 * 1024) {
-        toast.error(`${file.name} is too large (max 10 MB)`);
-        continue;
-      }
-      const preview = file.type.startsWith("image/")
-        ? URL.createObjectURL(file)
-        : undefined;
-      const entry: AttachedFile = { file, preview, uploading: true };
-      setAttachedFiles((prev) => [...prev, entry]);
-      const formData = new FormData();
-      formData.append("file", file);
-      operonFetch("/uploads", { method: "POST", body: formData })
-        .then(async (res) => {
-          if (!res.ok) {
-            const err = await res
-              .json()
-              .catch(() => ({ error: "Upload failed" }));
-            throw new Error(err.error || "Upload failed");
-          }
-          const data = await res.json();
-          setAttachedFiles((prev) =>
-            prev.map((f) =>
-              f.file === file
-                ? { ...f, uploading: false, url: data.publicUrl || data.url }
-                : f,
-            ),
-          );
-        })
-        .catch((err) => {
-          setAttachedFiles((prev) =>
-            prev.map((f) =>
-              f.file === file
-                ? { ...f, uploading: false, error: err.message }
-                : f,
-            ),
-          );
-          toast.error(`Failed to upload ${file.name}`);
-        });
-    }
+    uploadFiles(Array.from(e.dataTransfer.files));
   }
 
   async function startWhatsAppConnect() {
@@ -789,21 +763,38 @@ function ChatPage() {
       }
 
       const uploadedFiles = attachedFiles.filter((f) => f.url);
-      // Build structured attachments for vision model support
+      // Build structured attachments for vision model support (forwarded to
+      // the runner so it can shape them into provider-native image parts).
       const attachments = uploadedFiles.map((f) => ({
         url: f.url!,
         mimeType: f.file.type || "application/octet-stream",
         name: f.file.name,
       }));
-      // For non-image files, still include as text links for context
+      // Also surface attachments in the prompt itself: images as inline
+      // markdown so the user bubble shows a preview AND vision-capable models
+      // can fetch the URL; non-images as labelled links for context.
+      const imageFiles = uploadedFiles.filter((f) =>
+        f.file.type.startsWith("image/"),
+      );
       const nonImageFiles = uploadedFiles.filter(
         (f) => !f.file.type.startsWith("image/"),
       );
+      const fileSections: string[] = [];
+      if (imageFiles.length > 0) {
+        fileSections.push(
+          imageFiles.map((f) => `![${f.file.name}](${f.url})`).join("\n"),
+        );
+      }
       if (nonImageFiles.length > 0) {
-        const fileSection = nonImageFiles
-          .map((f) => `[File: ${f.file.name}](${f.url})`)
-          .join("\n");
-        content = content ? `${content}\n\n${fileSection}` : fileSection;
+        fileSections.push(
+          nonImageFiles
+            .map((f) => `[File: ${f.file.name}](${f.url})`)
+            .join("\n"),
+        );
+      }
+      if (fileSections.length > 0) {
+        const filePart = fileSections.join("\n\n");
+        content = content ? `${content}\n\n${filePart}` : filePart;
       }
 
       setInput("");
@@ -1706,7 +1697,13 @@ function ChatPage() {
                 onClick={() => scrollToBottom()}
                 size="icon"
                 variant="outline"
-                className="size-8 rounded-full border-0 bg-card/90 text-muted-foreground shadow-md hover:bg-card"
+                className={cn(
+                  "size-8 rounded-full border-0 bg-card/90 text-muted-foreground shadow-md hover:bg-card",
+                  // Subtle pulse while a response is actively streaming, so
+                  // the user has a clear visual cue that there's new content
+                  // below the fold (matches Claude / ChatGPT behaviour).
+                  isLoading && "animate-pulse text-primary",
+                )}
               >
                 <ChevronDown className="size-3.5" />
               </Button>
@@ -1737,6 +1734,7 @@ function ChatPage() {
               onDragOver={handleDragOver}
               onDragLeave={handleDragLeave}
               onDrop={handleDrop}
+              onPaste={handlePaste}
             >
               {dragOver && (
                 <div className="absolute inset-0 z-20 flex items-center justify-center rounded-2xl bg-primary/5 backdrop-blur-sm">
@@ -2015,7 +2013,7 @@ function ConversationStatusBar({
             <Loader2 className="size-2.5 animate-spin" />
             {compactStatus}
             {compactPreview && (
-              <span className="ml-1 max-w-[180px] truncate font-mono text-[9px] opacity-70">
+              <span className="ml-1 max-w-45 truncate font-mono text-[9px] opacity-70">
                 …{compactPreview}
               </span>
             )}

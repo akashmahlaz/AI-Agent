@@ -26,7 +26,7 @@ tokio-stream = { version = "0.1.17", features = ["sync"] }
 tokio-util = { version = "0.7.13", features = ["rt"] }
 async-stream = "0.3.6"
 futures = "0.3.31"
-tower-http = { version = "0.6.6", features = ["cors", "trace", "request-id", "util"] }
+tower-http = { version = "0.6.6", features = ["cors", "trace", "request-id", "util", "fs"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt", "json"] }
 uuid = { version = "1.19.0", features = ["v7", "serde"] }

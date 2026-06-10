@@ -4,8 +4,19 @@
 --
 -- Run with: sqlx migrate run
 
--- Enable pgvector for memories semantic search
-CREATE EXTENSION IF NOT EXISTS vector;
+-- Enable pgvector for memories semantic search.
+-- Wrapped in a DO block so the migration succeeds even on PostgreSQL
+-- installations that don't have pgvector installed (e.g. plain Postgres on
+-- Windows without the pgvector package). Semantic memory search will simply
+-- be unavailable; all other features work normally.
+DO $$
+BEGIN
+    CREATE EXTENSION IF NOT EXISTS vector;
+EXCEPTION
+    WHEN OTHERS THEN
+        RAISE NOTICE 'pgvector extension not available (%), skipping vector features', SQLERRM;
+END;
+$$;
 
 -- ── auth_profiles ──────────────────────────────────────────────────────────
 -- Encrypted API keys and OAuth tokens per provider per user.
@@ -133,12 +144,41 @@ CREATE INDEX IF NOT EXISTS jobs_next_run_at_idx ON jobs(next_run_at);
 
 -- ── memories (existing table) ───────────────────────────────────────────────
 -- Add pgvector embedding column and stale flag for re-embedding.
-ALTER TABLE memories
-    ADD COLUMN IF NOT EXISTS embedding vector(1536),
-    ADD COLUMN IF NOT EXISTS embedding_stale boolean DEFAULT true;
+-- These are also wrapped in DO blocks so a Postgres instance without pgvector
+-- still runs the rest of the migration cleanly.
+DO $$
+BEGIN
+    ALTER TABLE memories
+        ADD COLUMN IF NOT EXISTS embedding vector(1536),
+        ADD COLUMN IF NOT EXISTS embedding_stale boolean DEFAULT true;
+EXCEPTION
+    WHEN OTHERS THEN
+        -- pgvector not installed — add only the non-vector stale flag
+        BEGIN
+            ALTER TABLE memories
+                ADD COLUMN IF NOT EXISTS embedding_stale boolean DEFAULT true;
+        EXCEPTION WHEN duplicate_column THEN NULL;
+        END;
+        RAISE NOTICE 'pgvector not available, skipping embedding column on memories';
+END;
+$$;
 
-CREATE INDEX IF NOT EXISTS memories_embedding_idx
-    ON memories USING ivfflat (embedding vector_cosine_ops);
+-- Create the ivfflat index only when the vector extension and column exist.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_extension WHERE extname = 'vector'
+    ) AND EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'memories' AND column_name = 'embedding'
+    ) THEN
+        EXECUTE $idx$
+            CREATE INDEX IF NOT EXISTS memories_embedding_idx
+                ON memories USING ivfflat (embedding vector_cosine_ops)
+        $idx$;
+    END IF;
+END;
+$$;
 
 -- ── uploads ────────────────────────────────────────────────────────────────
 -- File upload metadata.

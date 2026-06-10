@@ -1,5 +1,5 @@
 import { listAuthProfiles } from "@/lib/services/auth-profiles";
-import { collections } from "@/lib/db-collections";
+import sql from "@/lib/pg";
 import { compactMemoryLine, type MemoryFact } from "@/lib/memory";
 import { getActiveWorkspaceFiles, formatWorkspaceFilesSection } from "@/lib/services/workspace-files";
 
@@ -9,7 +9,7 @@ import { getActiveWorkspaceFiles, formatWorkspaceFilesSection } from "@/lib/serv
  * The system prompt is written from that point of view: the agent is a power
  * tool, not a public chatbot. It does not refuse, lecture, or hedge about
  * "I cannot store credentials" — it has dedicated tools to store them
- * securely (AES-256-GCM in the user's own MongoDB) and is expected to use them.
+ * securely (AES-256-GCM in the user's own Postgres database) and is expected to use them.
  */
 export const OPERON_SYSTEM_PROMPT = [
   "You are Operon — a single-user, fully autonomous personal AI agent. The person you are talking to OWNS this deployment, the database, and every credential stored in it. Treat them as the operator of their own system, not as an untrusted public user.",
@@ -161,17 +161,32 @@ interface CapabilitySnapshot {
  * recall rather than flat \"N stored facts\" summary.
  */
 export async function buildCapabilitySnapshot(userId: string): Promise<CapabilitySnapshot> {
-  const [profiles, conversationCount, memories, wsFiles] = await Promise.all([
+  const [profiles, conversationRows, memoryRows, wsFiles] = await Promise.all([
     listAuthProfiles(userId).catch(() => []),
-    collections.conversations().countDocuments({ userId }).catch(() => 0),
-    collections.memories()
-      .find({ userId })
-      .sort({ importance: -1, updatedAt: -1 })
-      .limit(3)
-      .toArray()
-      .catch(() => [] as never[]),
+    sql<{ count: string }[]>`
+      select count(*)::text as count from conversations where user_id = ${userId}
+    `.catch(() => [] as { count: string }[]),
+    sql<MemoryFact[]>`
+      select id, user_id, content, kind, importance, source,
+             created_at, updated_at, last_used_at
+      from memories
+      where user_id = ${userId}
+      order by importance desc nulls last, updated_at desc
+      limit 3
+    `.catch(() => [] as MemoryFact[]),
     getActiveWorkspaceFiles(userId).catch(() => ({})),
   ]);
+
+  const conversationCount = Number(conversationRows[0]?.count ?? 0);
+  const memories = memoryRows.map((row) => {
+    const created: unknown = row.createdAt;
+    const updated: unknown = row.updatedAt;
+    return {
+      ...row,
+      createdAt: created instanceof Date ? created.toISOString() : String(created),
+      updatedAt: updated instanceof Date ? updated.toISOString() : String(updated),
+    };
+  }) as MemoryFact[];
 
   const aiProviderIds = new Set(["openai", "anthropic", "google", "openrouter", "groq", "deepseek", "xai", "mistral", "cohere", "fireworks", "perplexity", "together", "minimax", "qwen", "dashscope"]);
 

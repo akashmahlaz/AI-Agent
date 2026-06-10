@@ -442,19 +442,19 @@ async fn run_compaction(
         let messages = vec![
             ChatMessage {
                 role: "system".into(),
-                content: Some(
+                content: Some(serde_json::Value::String(
                     "You compress chat history. Produce a concise (≤200 word) bullet \
                      summary capturing user goals, decisions made, key facts, and any \
                      unresolved questions. Use plain text bullets, no preamble."
                         .into(),
-                ),
+                )),
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
             },
             ChatMessage {
                 role: "user".into(),
-                content: Some(prompt),
+                content: Some(serde_json::Value::String(prompt)),
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
@@ -462,7 +462,8 @@ async fn run_compaction(
         ];
 
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
+            .timeout(std::time::Duration::from_secs(120))
+            .tcp_keepalive(std::time::Duration::from_secs(30))
             .build()
             .unwrap_or_default();
 

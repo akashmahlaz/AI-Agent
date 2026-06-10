@@ -220,6 +220,7 @@ pub async fn create_run(
         workspace,
         github_token,
         initial_user_message: prompt.to_owned(),
+        initial_user_attachments: payload.attachments.clone().unwrap_or_default(),
         db: state.db.clone(),
         // Child runs (spawned via subagent tool) get an isolated, tighter
         // step budget so a runaway subagent can't exhaust the parent

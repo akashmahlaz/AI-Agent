@@ -1,8 +1,7 @@
-import { collections } from "@/lib/db-collections";
-import type { Document } from "mongodb";
+import sql from "@/lib/pg";
 
-export interface StoredUpload extends Document {
-  _id: string;
+export interface StoredUpload {
+  id: string;
   userId: string;
   filename: string;
   contentType: string;
@@ -13,30 +12,45 @@ export interface StoredUpload extends Document {
 
 export type NewUpload = Pick<StoredUpload, "userId" | "filename" | "contentType" | "size" | "url">;
 
-const uploads = () => collections.uploads<StoredUpload>();
+interface UploadRow {
+  id: string;
+  userId: string;
+  filename: string;
+  contentType: string | null;
+  sizeBytes: string | number | null;
+  storageKey: string;
+  createdAt: Date;
+}
 
-let indexesReady: Promise<void> | null = null;
-
-function ensureIndexes() {
-  indexesReady ??= Promise.all([
-    uploads().createIndex({ userId: 1, createdAt: -1 }),
-    uploads().createIndex({ url: 1 }),
-  ]).then(() => undefined);
-  return indexesReady;
+function fromRow(row: UploadRow): StoredUpload {
+  return {
+    id: row.id,
+    userId: row.userId,
+    filename: row.filename,
+    contentType: row.contentType ?? "application/octet-stream",
+    size: Number(row.sizeBytes ?? 0),
+    url: row.storageKey,
+    createdAt: row.createdAt.toISOString(),
+  };
 }
 
 export async function recordUpload(input: NewUpload) {
-  await ensureIndexes();
-  const document: StoredUpload = {
-    _id: crypto.randomUUID(),
-    ...input,
-    createdAt: new Date().toISOString(),
-  };
-  await uploads().insertOne(document);
-  return document;
+  const id = crypto.randomUUID();
+  const [row] = await sql<UploadRow[]>`
+    insert into uploads (id, user_id, filename, content_type, size_bytes, storage_key)
+    values (${id}, ${input.userId}, ${input.filename}, ${input.contentType}, ${input.size}, ${input.url})
+    returning id, user_id, filename, content_type, size_bytes, storage_key, created_at
+  `;
+  return fromRow(row);
 }
 
 export async function listUploads(userId: string, limit = 100) {
-  await ensureIndexes();
-  return uploads().find({ userId }).sort({ createdAt: -1 }).limit(limit).toArray();
+  const rows = await sql<UploadRow[]>`
+    select id, user_id, filename, content_type, size_bytes, storage_key, created_at
+    from uploads
+    where user_id = ${userId}
+    order by created_at desc
+    limit ${limit}
+  `;
+  return rows.map(fromRow);
 }

@@ -1,0 +1,101 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: operon-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: operon
+      POSTGRES_USER: operon
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U operon -d operon"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks:
+      - operon-net
+
+  backend:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: operon-backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://operon:${POSTGRES_PASSWORD}@postgres:5432/operon
+      OPERON_API_BIND: 0.0.0.0:8080
+      OPERON_JWT_SECRET: ${JWT_SECRET}
+      OPERON_WEB_ORIGIN: https://bematterfull.fireclaw.in
+      OPERON_OAUTH_REDIRECT_BASE: https://bematterfull.fireclaw.in
+      OPERON_NEXT_BASE_URL: https://bematterfull.fireclaw.in
+      OPERON_COOKIE_SECURE: "true"
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET}
+      OPERON_WORKSPACE_ROOT: /app/workspaces
+    volumes:
+      - workspaces:/app/workspaces
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - operon-net
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: https://bematterfull.fireclaw.in
+    container_name: operon-frontend
+    restart: unless-stopped
+    environment:
+      AUTH_SECRET: ${AUTH_SECRET}
+      AUTH_URL: https://bematterfull.fireclaw.in
+      AUTH_GOOGLE_ID: ${AUTH_GOOGLE_ID}
+      AUTH_GOOGLE_SECRET: ${AUTH_GOOGLE_SECRET}
+      LINKEDIN_CLIENT_ID: ${LINKEDIN_CLIENT_ID}
+      LINKEDIN_CLIENT_SECRET: ${LINKEDIN_CLIENT_SECRET}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      GOOGLE_GENERATIVE_AI_API_KEY: ${GOOGLE_GENERATIVE_AI_API_KEY}
+      CLOUDINARY_CLOUD_NAME: ${CLOUDINARY_CLOUD_NAME}
+      CLOUDINARY_API_KEY: ${CLOUDINARY_API_KEY}
+      CLOUDINARY_API_SECRET: ${CLOUDINARY_API_SECRET}
+      NEXT_PUBLIC_API_URL: https://bematterfull.fireclaw.in
+      # Internal backend URL (container-to-container)
+      OPERON_BACKEND_URL: http://backend:8080
+    depends_on:
+      - backend
+    networks:
+      - operon-net
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: operon-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - frontend
+      - backend
+    networks:
+      - operon-net
+
+volumes:
+  postgres_data:
+  workspaces:
+  caddy_data:
+  caddy_config:
+
+networks:
+  operon-net:
+    driver: bridge

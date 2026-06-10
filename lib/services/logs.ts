@@ -1,46 +1,66 @@
-import { collections } from "@/lib/db-collections";
+import sql from "@/lib/pg";
 import type { LogEntry } from "@/lib/types";
-import type { Document } from "mongodb";
 
-export interface StoredLogEntry extends Document, LogEntry {
-  _id: string;
+export interface StoredLogEntry extends LogEntry {
   userId?: string;
   metadata?: Record<string, unknown>;
 }
 
-const logs = () => collections.logs<StoredLogEntry>();
-
-let indexesReady: Promise<void> | null = null;
-
-function ensureIndexes() {
-  indexesReady ??= Promise.all([
-    logs().createIndex({ createdAt: -1 }),
-    logs().createIndex({ userId: 1, createdAt: -1 }),
-    logs().createIndex({ source: 1, createdAt: -1 }),
-  ]).then(() => undefined);
-  return indexesReady;
+interface LogRow {
+  id: string;
+  userId: string | null;
+  level: LogEntry["level"];
+  source: string;
+  message: string;
+  metadata: Record<string, unknown> | null;
+  createdAt: Date;
 }
 
-export async function appendLog(entry: Omit<LogEntry, "id" | "createdAt"> & { userId?: string; metadata?: Record<string, unknown> }) {
-  await ensureIndexes();
-  const createdAt = new Date().toISOString();
-  const document: StoredLogEntry = {
-    _id: crypto.randomUUID(),
-    id: crypto.randomUUID(),
-    level: entry.level,
-    source: entry.source,
-    message: entry.message,
-    userId: entry.userId,
-    metadata: entry.metadata,
-    createdAt,
+function fromRow(row: LogRow): StoredLogEntry {
+  return {
+    id: row.id,
+    level: row.level,
+    source: row.source,
+    message: row.message,
+    userId: row.userId ?? undefined,
+    metadata: row.metadata ?? undefined,
+    createdAt: row.createdAt.toISOString(),
   };
-  document.id = document._id;
-  await logs().insertOne(document);
-  return document;
+}
+
+export async function appendLog(
+  entry: Omit<LogEntry, "id" | "createdAt"> & { userId?: string; metadata?: Record<string, unknown> },
+) {
+  const id = crypto.randomUUID();
+  const [row] = await sql<LogRow[]>`
+    insert into logs (id, user_id, level, source, message, metadata)
+    values (
+      ${id},
+      ${entry.userId ?? null},
+      ${entry.level},
+      ${entry.source},
+      ${entry.message},
+      ${sql.json((entry.metadata ?? {}) as never)}
+    )
+    returning id, user_id, level, source, message, metadata, created_at
+  `;
+  return fromRow(row);
 }
 
 export async function listLogs({ userId, limit = 100 }: { userId?: string; limit?: number } = {}) {
-  await ensureIndexes();
-  const query = userId ? { userId } : {};
-  return logs().find(query).sort({ createdAt: -1 }).limit(limit).toArray();
+  const rows = userId
+    ? await sql<LogRow[]>`
+        select id, user_id, level, source, message, metadata, created_at
+        from logs
+        where user_id = ${userId}
+        order by created_at desc
+        limit ${limit}
+      `
+    : await sql<LogRow[]>`
+        select id, user_id, level, source, message, metadata, created_at
+        from logs
+        order by created_at desc
+        limit ${limit}
+      `;
+  return rows.map(fromRow);
 }

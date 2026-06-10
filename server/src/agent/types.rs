@@ -38,6 +38,24 @@ pub struct RunRequest {
     /// Maps to OpenAI `reasoning_effort` and Anthropic `thinking.budget_tokens`.
     #[serde(default, alias = "reasoningLevel")]
     pub reasoning_level: Option<String>,
+    /// Optional file attachments (typically images for vision models) that
+    /// should be sent to the provider as structured content parts alongside
+    /// the user prompt. Each entry must include a publicly fetchable URL.
+    #[serde(default)]
+    pub attachments: Option<Vec<AttachmentInput>>,
+}
+
+/// One attachment from the chat UI (uploaded via /uploads, stored in S3, etc.).
+/// The runner converts these into provider-native content blocks
+/// (OpenAI `image_url`, Anthropic `image` with URL source) for the first
+/// user turn so vision-capable models can actually see the image.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AttachmentInput {
+    pub url: String,
+    #[serde(default, alias = "mimeType", alias = "mime_type")]
+    pub mime_type: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

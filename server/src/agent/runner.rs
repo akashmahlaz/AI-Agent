@@ -34,7 +34,7 @@ use super::{
     openai::{self, ChatMessage, OpenAiEvent, ToolCall, ToolCallFunction},
     prompt::build_system_message,
     tools::{self, AgentContext, Workspace},
-    types::{AgentEvent, RunId, RunStatus},
+    types::{AgentEvent, AttachmentInput, RunId, RunStatus},
 };
 
 /// Build a present-tense + past-tense pair for a tool call so the UI can
@@ -400,6 +400,10 @@ pub struct RunnerSpec {
     pub workspace: Workspace,
     pub github_token: Option<String>,
     pub initial_user_message: String,
+    /// Optional file/image attachments to include as structured content
+    /// parts in the first user turn (vision-capable models will see actual
+    /// image data; text-only models see the URLs as text).
+    pub initial_user_attachments: Vec<AttachmentInput>,
     pub db: Pool<Postgres>,
     pub max_steps: usize,
     pub channel: String,
@@ -443,7 +447,12 @@ async fn run(spec: RunnerSpec, handle: RunHandle) -> Result<()> {
     set_status(&spec.db, spec.run_id, RunStatus::Running, None).await?;
 
     let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
+        // Long-running streams (many tool steps) can exceed 2 minutes.
+        .timeout(std::time::Duration::from_secs(600))
+        // TCP keepalives prevent Anthropic/OpenAI load balancers from silently
+        // killing idle connections during model "thinking" time (Windows
+        // WSAECONNRESET / os error 10054).
+        .tcp_keepalive(std::time::Duration::from_secs(30))
         .build()
         .context("building reqwest client")?;
 
@@ -480,7 +489,10 @@ async fn run(spec: RunnerSpec, handle: RunHandle) -> Result<()> {
     let mut messages: Vec<ChatMessage> = Vec::new();
     messages.push(ChatMessage {
         role: "system".to_owned(),
-        content: Some(build_system_message(&spec.workspace, &spec.channel)),
+        content: Some(Value::String(build_system_message(
+            &spec.workspace,
+            &spec.channel,
+        ))),
         name: None,
         tool_call_id: None,
         tool_calls: None,
@@ -489,7 +501,10 @@ async fn run(spec: RunnerSpec, handle: RunHandle) -> Result<()> {
     if prior.is_empty() {
         messages.push(ChatMessage {
             role: "user".to_owned(),
-            content: Some(spec.initial_user_message.clone()),
+            content: Some(build_initial_user_content(
+                &spec.initial_user_message,
+                &spec.initial_user_attachments,
+            )),
             name: None,
             tool_call_id: None,
             tool_calls: None,
@@ -508,6 +523,12 @@ async fn run(spec: RunnerSpec, handle: RunHandle) -> Result<()> {
         if handle.cancel.is_cancelled() {
             anyhow::bail!("run cancelled");
         }
+
+        // Per-step retry counter for transparent connection-reset recovery.
+        // When the provider resets mid-stream before any content is emitted,
+        // we re-issue the exact same request up to this many times.
+        let mut step_connection_retries: u32 = 0;
+        const MAX_STEP_CONNECTION_RETRIES: u32 = 3;
 
         let tool_definitions = provider_tool_definitions(
             &spec.provider,
@@ -566,6 +587,9 @@ async fn run(spec: RunnerSpec, handle: RunHandle) -> Result<()> {
         let mut provider_notices: Vec<Value> = Vec::new();
         let mut provider_request_id: Option<String> = None;
         let mut stream_failed: Option<String> = None;
+        // When set, the step will be retried silently (connection reset before
+        // any content was emitted).
+        let mut stream_interrupted_retriable = false;
 
         while let Some(event) = stream.next().await {
             if handle.cancel.is_cancelled() {
@@ -691,6 +715,24 @@ async fn run(spec: RunnerSpec, handle: RunHandle) -> Result<()> {
                     finish_reason = r;
                     final_tool_calls = tool_calls;
                 }
+                OpenAiEvent::StreamInterrupted { retriable, message } => {
+                    if retriable && step_connection_retries < MAX_STEP_CONNECTION_RETRIES {
+                        // Nothing was emitted to the client yet — retry silently.
+                        stream_interrupted_retriable = true;
+                    } else {
+                        // Content was already streamed or retries exhausted.
+                        // Surface a user-friendly error instead of the raw OS error.
+                        handle
+                            .emit(&events::stream_error(
+                                &message,
+                                provider_request_id.as_deref(),
+                                Some(spec.provider.as_str()),
+                            ))
+                            .await?;
+                        stream_failed = Some(message);
+                    }
+                    break;
+                }
             }
         }
 
@@ -699,6 +741,23 @@ async fn run(spec: RunnerSpec, handle: RunHandle) -> Result<()> {
         }
         if text_started {
             handle.emit(&events::text_end()).await?;
+        }
+
+        // Silent retry: connection was reset before any content was emitted.
+        // Re-issue the same step without touching messages or the user-visible
+        // stream. Backoff: 1s, 2s, 3s.
+        if stream_interrupted_retriable {
+            step_connection_retries += 1;
+            let delay = std::time::Duration::from_secs(step_connection_retries as u64);
+            tracing::warn!(
+                run_id = %spec.run_id,
+                attempt = step_connection_retries,
+                max = MAX_STEP_CONNECTION_RETRIES,
+                delay_ms = delay.as_millis() as u64,
+                "stream connection reset — retrying step transparently"
+            );
+            tokio::time::sleep(delay).await;
+            continue; // outer for _step loop — re-issues the same step
         }
 
         // If the underlying provider stream errored mid-flight, persist the
@@ -773,7 +832,7 @@ async fn run(spec: RunnerSpec, handle: RunHandle) -> Result<()> {
             content: if accumulated_text.is_empty() {
                 None
             } else {
-                Some(accumulated_text.clone())
+                Some(Value::String(accumulated_text.clone()))
             },
             name: None,
             tool_call_id: None,
@@ -1007,7 +1066,7 @@ async fn run(spec: RunnerSpec, handle: RunHandle) -> Result<()> {
 
             let tool_message = ChatMessage {
                 role: "tool".to_owned(),
-                content: Some(result_value.to_string()),
+                content: Some(Value::String(result_value.to_string())),
                 name: Some(tc.function.name.clone()),
                 tool_call_id: Some(tc.id.clone()),
                 tool_calls: None,
@@ -1094,7 +1153,7 @@ async fn load_conversation_history(
         match role.as_str() {
             "user" => out.push(ChatMessage {
                 role: "user".to_owned(),
-                content: Some(content),
+                content: Some(Value::String(content)),
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
@@ -1146,7 +1205,7 @@ async fn load_conversation_history(
                     content: if final_text.is_empty() {
                         None
                     } else {
-                        Some(final_text)
+                        Some(Value::String(final_text))
                     },
                     name: None,
                     tool_call_id: None,
@@ -1182,7 +1241,7 @@ async fn load_conversation_history(
                             let result = part.get("result").cloned().unwrap_or(json!({}));
                             out.push(ChatMessage {
                                 role: "tool".to_owned(),
-                                content: Some(result.to_string()),
+                                content: Some(Value::String(result.to_string())),
                                 name: Some(tool_name.to_owned()),
                                 tool_call_id: Some(tool_call_id.to_owned()),
                                 tool_calls: None,
@@ -1326,6 +1385,7 @@ async fn execute_subagent(
         workspace: parent_ctx.workspace.clone(),
         github_token: parent_ctx.github_token.clone(),
         initial_user_message: prompt.to_string(),
+        initial_user_attachments: Vec::new(),
         db: parent_spec.db.clone(),
         max_steps: default_subagent_max_steps(),
         channel: parent_spec.channel.clone(),
@@ -1510,6 +1570,44 @@ async fn auto_title_conversation(
         .await
         .context("updating conversation title")?;
     Ok(())
+}
+
+/// Build the content payload for the first user turn. If no attachments are
+/// supplied this returns a plain JSON string (which OpenAI/Anthropic both
+/// accept as the simplest message form). With attachments it returns a
+/// structured parts array using OpenAI Chat Completions syntax
+/// (`{"type":"text",...}` and `{"type":"image_url","image_url":{"url":...}}`).
+/// The Anthropic transformer in [`super::anthropic`] translates this
+/// shape into Anthropic's native image content blocks.
+fn build_initial_user_content(text: &str, attachments: &[AttachmentInput]) -> Value {
+    if attachments.is_empty() {
+        return Value::String(text.to_owned());
+    }
+    let mut parts: Vec<Value> = Vec::with_capacity(attachments.len() + 1);
+    if !text.is_empty() {
+        parts.push(json!({ "type": "text", "text": text }));
+    }
+    for att in attachments {
+        let mime = att.mime_type.as_deref().unwrap_or("");
+        if mime.starts_with("image/") {
+            parts.push(json!({
+                "type": "image_url",
+                "image_url": { "url": att.url },
+            }));
+        } else {
+            // Non-image attachments: include as a text reference so the model
+            // at least knows about the file. Provider-native file/document
+            // blocks (Anthropic `document`, OpenAI Files API) are not wired
+            // up yet — that's a follow-up.
+            let label = att.name.as_deref().unwrap_or("file");
+            parts.push(json!({
+                "type": "text",
+                "text": format!("[Attached file '{label}' ({mime}): {url}]",
+                    label = label, mime = mime, url = att.url),
+            }));
+        }
+    }
+    Value::Array(parts)
 }
 
 /// Simple heuristic title generation from user prompt (no LLM call needed).

@@ -1,11 +1,10 @@
 import crypto from "crypto";
-import { collections } from "@/lib/db-collections";
-import type { Document } from "mongodb";
+import sql from "@/lib/pg";
 
 export type AuthProfileType = "api_key" | "oauth" | "token";
 
-export interface StoredAuthProfile extends Document {
-  _id: string;
+export interface StoredAuthProfile {
+  id: string;
   userId: string;
   profileId: string;
   type: AuthProfileType;
@@ -31,6 +30,22 @@ export interface PublicAuthProfile {
   metadata?: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
+}
+
+interface AuthProfileRow {
+  id: string;
+  userId: string;
+  provider: string;
+  type: AuthProfileType;
+  encryptedApiKey: string | null;
+  encryptedOauthToken: string | null;
+  tokenRef: string | null;
+  baseUrl: string | null;
+  models: string[] | null;
+  defaultModel: string | null;
+  metadata: Record<string, unknown> | null;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
 const ENV_MAP: Record<string, string> = {
@@ -61,21 +76,9 @@ const ENV_MAP: Record<string, string> = {
   maton: "MATON_API_KEY",
 };
 
-const authProfiles = () => collections.authProfiles<StoredAuthProfile>();
-
-let indexesReady: Promise<void> | null = null;
-
-function ensureIndexes() {
-  indexesReady ??= Promise.all([
-    authProfiles().createIndex({ userId: 1, profileId: 1 }, { unique: true }),
-    authProfiles().createIndex({ userId: 1, provider: 1 }),
-    authProfiles().createIndex({ userId: 1, updatedAt: -1 }),
-  ]).then(() => undefined);
-  return indexesReady;
-}
-
 function encryptionKey() {
-  const secret = process.env.AUTH_SECRET || process.env.NEXTAUTH_SECRET || "operon-development-secret";
+  const secret =
+    process.env.AUTH_SECRET || process.env.NEXTAUTH_SECRET || "operon-development-secret";
   return crypto.createHash("sha256").update(secret).digest();
 }
 
@@ -90,7 +93,11 @@ function encryptToken(token: string) {
 function decryptToken(value: string) {
   if (!value.startsWith("v1:")) return value;
   const [, ivRaw, tagRaw, encryptedRaw] = value.split(":");
-  const decipher = crypto.createDecipheriv("aes-256-gcm", encryptionKey(), Buffer.from(ivRaw, "base64url"));
+  const decipher = crypto.createDecipheriv(
+    "aes-256-gcm",
+    encryptionKey(),
+    Buffer.from(ivRaw, "base64url"),
+  );
   decipher.setAuthTag(Buffer.from(tagRaw, "base64url"));
   return Buffer.concat([
     decipher.update(Buffer.from(encryptedRaw, "base64url")),
@@ -98,9 +105,33 @@ function decryptToken(value: string) {
   ]).toString("utf8");
 }
 
-function tokenRef(token: string) {
+function tokenRefFor(token: string) {
   if (token.length <= 10) return `${token.slice(0, 2)}...${token.slice(-2)}`;
   return `${token.slice(0, 6)}...${token.slice(-4)}`;
+}
+
+function readTokenFromRow(row: AuthProfileRow): string | null {
+  if (row.type === "oauth") return row.encryptedOauthToken;
+  return row.encryptedApiKey ?? row.encryptedOauthToken;
+}
+
+function rowToStored(row: AuthProfileRow): StoredAuthProfile {
+  const encrypted = readTokenFromRow(row) ?? "";
+  return {
+    id: row.id,
+    userId: row.userId,
+    profileId: `${row.provider}:${row.type}`,
+    type: row.type,
+    provider: row.provider,
+    tokenEncrypted: encrypted,
+    tokenRef: row.tokenRef ?? "",
+    baseUrl: row.baseUrl ?? undefined,
+    models: row.models ?? undefined,
+    defaultModel: row.defaultModel ?? undefined,
+    metadata: row.metadata ?? undefined,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
 }
 
 function toPublic(profile: StoredAuthProfile): PublicAuthProfile {
@@ -118,16 +149,45 @@ function toPublic(profile: StoredAuthProfile): PublicAuthProfile {
   };
 }
 
-export async function listAuthProfiles(userId: string) {
-  await ensureIndexes();
-  const rows = await authProfiles().find({ userId }).sort({ updatedAt: -1 }).toArray();
-  return rows.map(toPublic);
+const SELECT_COLS = sql`
+  id, user_id, provider, type,
+  encrypted_api_key, encrypted_oauth_token,
+  token_ref, base_url,
+  models, default_model, metadata,
+  created_at, updated_at
+`;
+
+export async function listAuthProfiles(userId: string): Promise<PublicAuthProfile[]> {
+  const rows = await sql<AuthProfileRow[]>`
+    select ${SELECT_COLS}
+    from auth_profiles
+    where user_id = ${userId}
+    order by updated_at desc
+  `;
+  return rows.map(rowToStored).map(toPublic);
 }
 
-export async function getAuthProfile(userId: string, provider: string, type?: AuthProfileType) {
-  await ensureIndexes();
-  const profile = await authProfiles().findOne(type ? { userId, provider, type } : { userId, provider });
-  return profile ? toPublic(profile) : null;
+export async function getAuthProfile(
+  userId: string,
+  provider: string,
+  type?: AuthProfileType,
+): Promise<PublicAuthProfile | null> {
+  const rows = type
+    ? await sql<AuthProfileRow[]>`
+        select ${SELECT_COLS}
+        from auth_profiles
+        where user_id = ${userId} and provider = ${provider} and type = ${type}
+        limit 1
+      `
+    : await sql<AuthProfileRow[]>`
+        select ${SELECT_COLS}
+        from auth_profiles
+        where user_id = ${userId} and provider = ${provider}
+        order by updated_at desc
+        limit 1
+      `;
+  const row = rows[0];
+  return row ? toPublic(rowToStored(row)) : null;
 }
 
 export async function upsertAuthProfile({
@@ -148,81 +208,117 @@ export async function upsertAuthProfile({
   models?: string[];
   defaultModel?: string;
   metadata?: Record<string, unknown>;
-}) {
-  await ensureIndexes();
-  const now = new Date().toISOString();
-  const profileId = `${provider}:${type}`;
-  await authProfiles().updateOne(
-    { userId, profileId },
-    {
-      $set: {
-        type,
-        provider,
-        tokenEncrypted: encryptToken(token),
-        tokenRef: tokenRef(token),
-        baseUrl: baseUrl || undefined,
-        models,
-        defaultModel,
-        metadata,
-        updatedAt: now,
-      },
-      $setOnInsert: {
-        _id: crypto.randomUUID(),
-        userId,
-        profileId,
-        createdAt: now,
-      },
-    },
-    { upsert: true },
-  );
-  const saved = await authProfiles().findOne({ userId, profileId });
-  return saved ? toPublic(saved) : null;
+}): Promise<PublicAuthProfile | null> {
+  const encrypted = encryptToken(token);
+  const ref = tokenRefFor(token);
+
+  // Insert with both possible token columns; the conflict update writes only the column that matches the type.
+  const apiKeyValue = type === "oauth" ? null : encrypted;
+  const oauthValue = type === "oauth" ? encrypted : null;
+
+  const [row] = await sql<AuthProfileRow[]>`
+    insert into auth_profiles (
+      id, user_id, provider, type,
+      encrypted_api_key, encrypted_oauth_token,
+      token_ref, base_url,
+      models, default_model, metadata
+    ) values (
+      ${crypto.randomUUID()},
+      ${userId},
+      ${provider},
+      ${type},
+      ${apiKeyValue},
+      ${oauthValue},
+      ${ref},
+      ${baseUrl ?? null},
+      ${sql.json((models ?? []) as never)},
+      ${defaultModel ?? null},
+      ${sql.json((metadata ?? {}) as never)}
+    )
+    on conflict (user_id, provider, type) do update set
+      encrypted_api_key     = case when excluded.type = 'oauth' then auth_profiles.encrypted_api_key     else excluded.encrypted_api_key     end,
+      encrypted_oauth_token = case when excluded.type = 'oauth' then excluded.encrypted_oauth_token     else auth_profiles.encrypted_oauth_token end,
+      token_ref             = excluded.token_ref,
+      base_url              = coalesce(excluded.base_url, auth_profiles.base_url),
+      models                = case when jsonb_array_length(excluded.models) > 0 then excluded.models else auth_profiles.models end,
+      default_model         = coalesce(excluded.default_model, auth_profiles.default_model),
+      metadata              = auth_profiles.metadata || excluded.metadata,
+      updated_at            = now()
+    returning ${SELECT_COLS}
+  `;
+  return row ? toPublic(rowToStored(row)) : null;
 }
 
-export async function removeAuthProfile(userId: string, profileId: string) {
-  await ensureIndexes();
-  await authProfiles().deleteOne({ userId, profileId });
+export async function removeAuthProfile(userId: string, profileId: string): Promise<void> {
+  const [provider, type] = profileId.split(":");
+  await sql`
+    delete from auth_profiles
+    where user_id = ${userId} and provider = ${provider} and type = ${type ?? "api_key"}
+  `;
 }
 
-export async function updateAuthProfileModels(userId: string, provider: string, models: string[], defaultModel?: string) {
-  await ensureIndexes();
-  const now = new Date().toISOString();
-  const result = await authProfiles().findOneAndUpdate(
-    { userId, provider },
-    {
-      $set: {
-        models,
-        defaultModel,
-        updatedAt: now,
-      },
-    },
-    { returnDocument: "after" },
-  );
-  return result ? toPublic(result) : null;
+export async function updateAuthProfileModels(
+  userId: string,
+  provider: string,
+  models: string[],
+  defaultModel?: string,
+): Promise<PublicAuthProfile | null> {
+  const [row] = await sql<AuthProfileRow[]>`
+    update auth_profiles
+    set models        = ${sql.json(models)},
+        default_model = coalesce(${defaultModel ?? null}, default_model),
+        updated_at    = now()
+    where user_id = ${userId} and provider = ${provider}
+    returning ${SELECT_COLS}
+  `;
+  return row ? toPublic(rowToStored(row)) : null;
 }
 
-export async function resolveProviderKey(provider: string, userId?: string) {
-  await ensureIndexes();
+export async function resolveProviderKey(
+  provider: string,
+  userId?: string,
+): Promise<string | undefined> {
   if (userId) {
-    const profile = await authProfiles().findOne({ userId, provider });
-    if (profile?.tokenEncrypted) return decryptToken(profile.tokenEncrypted);
+    const [row] = await sql<AuthProfileRow[]>`
+      select ${SELECT_COLS}
+      from auth_profiles
+      where user_id = ${userId} and provider = ${provider}
+      order by updated_at desc
+      limit 1
+    `;
+    const encrypted = row ? readTokenFromRow(row) : null;
+    if (encrypted) return decryptToken(encrypted);
   }
   const envKey = ENV_MAP[provider];
   return envKey ? process.env[envKey] : undefined;
 }
 
-export async function resolveProviderBaseUrl(provider: string, userId?: string) {
-  await ensureIndexes();
+export async function resolveProviderBaseUrl(
+  provider: string,
+  userId?: string,
+): Promise<string | undefined> {
   if (!userId) return undefined;
-  const profile = await authProfiles().findOne({ userId, provider });
-  return profile?.baseUrl;
+  const [row] = await sql<{ baseUrl: string | null }[]>`
+    select base_url
+    from auth_profiles
+    where user_id = ${userId} and provider = ${provider}
+    order by updated_at desc
+    limit 1
+  `;
+  return row?.baseUrl ?? undefined;
 }
 
-export async function getMostRecentModelProfile(userId: string) {
-  await ensureIndexes();
-  const profile = await authProfiles().findOne(
-    { userId, models: { $exists: true, $ne: [] } },
-    { sort: { updatedAt: -1 } },
-  );
-  return profile ? toPublic(profile) : null;
+export async function getMostRecentModelProfile(
+  userId: string,
+): Promise<PublicAuthProfile | null> {
+  const [row] = await sql<AuthProfileRow[]>`
+    select ${SELECT_COLS}
+    from auth_profiles
+    where user_id = ${userId}
+      and jsonb_typeof(models) = 'array'
+      and jsonb_array_length(models) > 0
+    order by updated_at desc
+    limit 1
+  `;
+  return row ? toPublic(rowToStored(row)) : null;
 }

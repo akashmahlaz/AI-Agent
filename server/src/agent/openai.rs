@@ -17,14 +17,29 @@ use serde_json::Value;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
+    /// Provider-native message content. May be a plain string OR an array of
+    /// structured parts (e.g. `[{"type":"text",...},{"type":"image_url",...}]`)
+    /// to support vision attachments. OpenAI Chat Completions and the
+    /// Responses API both accept either shape for `user` messages; Anthropic
+    /// has a dedicated transformer in [`super::anthropic`].
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
+    pub content: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
+}
+
+impl ChatMessage {
+    /// Returns the textual content if and only if this message's content is a
+    /// plain string. Returns `None` when content is missing OR when it's a
+    /// structured parts array (callers needing parts should match on the raw
+    /// `content` value directly).
+    pub fn text_content(&self) -> Option<&str> {
+        self.content.as_ref().and_then(|v| v.as_str())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,6 +97,14 @@ pub enum OpenAiEvent {
     Finished {
         finish_reason: String,
         tool_calls: Vec<ToolCall>,
+    },
+    /// The underlying TCP connection was reset mid-stream (e.g. Anthropic load
+    /// balancer closing idle connections, Windows OS error 10054).
+    /// `retriable` is true when no content was emitted yet so the runner can
+    /// transparently retry the step without the user seeing anything.
+    StreamInterrupted {
+        retriable: bool,
+        message: String,
     },
 }
 
@@ -381,16 +404,24 @@ fn to_responses_input(messages: &[ChatMessage]) -> (Option<String>, Vec<Value>) 
         match message.role.as_str() {
             "system" => {
                 if instructions.is_none() {
-                    instructions = message.content.clone();
+                    instructions = message.text_content().map(str::to_owned);
                 }
             }
             "user" | "assistant" => {
-                if let Some(content) = message.content.as_deref().filter(|value| !value.is_empty())
-                {
-                    input.push(serde_json::json!({
-                        "role": message.role,
-                        "content": content,
-                    }));
+                // Pass-through structured array content (vision parts etc.)
+                // for user role; assistants still always send a plain string.
+                if let Some(value) = message.content.as_ref() {
+                    let is_empty = match value {
+                        Value::String(s) => s.is_empty(),
+                        Value::Array(a) => a.is_empty(),
+                        _ => true,
+                    };
+                    if !is_empty {
+                        input.push(serde_json::json!({
+                            "role": message.role,
+                            "content": value,
+                        }));
+                    }
                 }
                 if message.role == "assistant" {
                     if let Some(tool_calls) = &message.tool_calls {
@@ -411,7 +442,7 @@ fn to_responses_input(messages: &[ChatMessage]) -> (Option<String>, Vec<Value>) 
                     input.push(serde_json::json!({
                         "type": "function_call_output",
                         "call_id": call_id,
-                        "output": message.content.as_deref().unwrap_or(""),
+                        "output": message.text_content().unwrap_or(""),
                     }));
                 }
             }

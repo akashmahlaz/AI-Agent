@@ -1,58 +1,96 @@
-import { collections } from "@/lib/db-collections";
+import sql from "@/lib/pg";
 import type { ScheduledJob } from "@/lib/types";
-import type { Document } from "mongodb";
 
-export interface StoredScheduledJob extends Document, ScheduledJob {
-  _id: string;
+export interface StoredScheduledJob extends ScheduledJob {
   userId: string;
   createdAt: string;
   updatedAt: string;
 }
 
-const jobs = () => collections.jobs<StoredScheduledJob>();
+interface JobRow {
+  id: string;
+  userId: string;
+  kind: string;
+  schedule: string;
+  payload: {
+    description?: string;
+    status?: ScheduledJob["status"];
+  } | null;
+  lastRunAt: Date | null;
+  nextRunAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
 
-let indexesReady: Promise<void> | null = null;
-
-function ensureIndexes() {
-  indexesReady ??= Promise.all([
-    jobs().createIndex({ userId: 1, status: 1 }),
-    jobs().createIndex({ userId: 1, nextRunAt: 1 }),
-  ]).then(() => undefined);
-  return indexesReady;
+function fromRow(row: JobRow): StoredScheduledJob {
+  const payload = row.payload ?? {};
+  return {
+    id: row.id,
+    userId: row.userId,
+    description: payload.description ?? "",
+    cron: row.schedule,
+    lastRunAt: row.lastRunAt?.toISOString(),
+    nextRunAt: row.nextRunAt?.toISOString(),
+    status: payload.status ?? "active",
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
 }
 
 export async function listJobs(userId: string) {
-  await ensureIndexes();
-  return jobs().find({ userId }).sort({ createdAt: -1 }).toArray();
+  const rows = await sql<JobRow[]>`
+    select id, user_id, kind, schedule, payload, last_run_at, next_run_at, created_at, updated_at
+    from jobs
+    where user_id = ${userId}
+    order by created_at desc
+  `;
+  return rows.map(fromRow);
 }
 
-export async function createJob(userId: string, input: Omit<ScheduledJob, "id" | "status"> & { status?: ScheduledJob["status"] }) {
-  await ensureIndexes();
-  const createdAt = new Date().toISOString();
-  const document: StoredScheduledJob = {
-    _id: crypto.randomUUID(),
-    id: crypto.randomUUID(),
-    userId,
-    description: input.description,
-    cron: input.cron,
-    lastRunAt: input.lastRunAt,
-    nextRunAt: input.nextRunAt,
-    status: input.status ?? "active",
-    createdAt,
-    updatedAt: createdAt,
-  };
-  document.id = document._id;
-  await jobs().insertOne(document);
-  return document;
+export async function createJob(
+  userId: string,
+  input: Omit<ScheduledJob, "id" | "status"> & { status?: ScheduledJob["status"] },
+) {
+  const id = crypto.randomUUID();
+  const payload = { description: input.description, status: input.status ?? "active" };
+  const [row] = await sql<JobRow[]>`
+    insert into jobs (id, user_id, kind, schedule, payload, last_run_at, next_run_at)
+    values (
+      ${id},
+      ${userId},
+      ${"scheduled"},
+      ${input.cron},
+      ${sql.json(payload as never)},
+      ${input.lastRunAt ?? null},
+      ${input.nextRunAt ?? null}
+    )
+    returning id, user_id, kind, schedule, payload, last_run_at, next_run_at, created_at, updated_at
+  `;
+  return fromRow(row);
 }
 
 export async function updateJob(userId: string, id: string, patch: Partial<Omit<ScheduledJob, "id">>) {
-  await ensureIndexes();
-  await jobs().updateOne({ userId, _id: id }, { $set: { ...patch, updatedAt: new Date().toISOString() } });
-  return jobs().findOne({ userId, _id: id });
+  const payloadDelta: Record<string, unknown> = {};
+  if (patch.description !== undefined) payloadDelta.description = patch.description;
+  if (patch.status !== undefined) payloadDelta.status = patch.status;
+
+  const [row] = await sql<JobRow[]>`
+    update jobs
+    set
+      schedule    = coalesce(${patch.cron ?? null}, schedule),
+      last_run_at = coalesce(${patch.lastRunAt ?? null}::timestamptz, last_run_at),
+      next_run_at = coalesce(${patch.nextRunAt ?? null}::timestamptz, next_run_at),
+      payload     = payload || ${sql.json(payloadDelta as never)}::jsonb,
+      updated_at  = now()
+    where user_id = ${userId} and id = ${id}
+    returning id, user_id, kind, schedule, payload, last_run_at, next_run_at, created_at, updated_at
+  `;
+  return row ? fromRow(row) : null;
 }
 
 export async function deleteJob(userId: string, id: string) {
-  await ensureIndexes();
-  return jobs().deleteOne({ userId, _id: id });
+  const result = await sql`
+    delete from jobs where user_id = ${userId} and id = ${id}
+  `;
+  return { deletedCount: result.count };
 }

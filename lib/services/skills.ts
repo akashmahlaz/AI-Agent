@@ -1,62 +1,79 @@
-import { collections } from "@/lib/db-collections";
+import sql from "@/lib/pg";
 import { builtInSkills } from "@/lib/skills";
 import type { Skill } from "@/lib/types";
-import type { Document } from "mongodb";
 
-export interface StoredSkill extends Document, Skill {
-  _id: string;
+export interface StoredSkill extends Skill {
   userId: string;
-  createdAt: string;
   updatedAt: string;
 }
 
-const skills = () => collections.skills<StoredSkill>();
-
-let indexesReady: Promise<void> | null = null;
-
-function ensureIndexes() {
-  indexesReady ??= Promise.all([
-    skills().createIndex({ userId: 1, slug: 1 }, { unique: true }),
-    skills().createIndex({ userId: 1, enabled: 1 }),
-  ]).then(() => undefined);
-  return indexesReady;
+interface SkillRow {
+  id: string;
+  userId: string;
+  name: string;
+  description: string | null;
+  payload: {
+    slug?: string;
+    category?: Skill["category"];
+    enabled?: boolean;
+    installed?: boolean;
+  } | null;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
-function mergeSkill(baseSkill: Skill, storedSkill?: StoredSkill): Skill {
-  return storedSkill ? { ...baseSkill, ...storedSkill, id: storedSkill.id || storedSkill._id } : baseSkill;
+function fromRow(row: SkillRow): StoredSkill | null {
+  const slug = row.payload?.slug;
+  if (!slug) return null;
+  const base = builtInSkills.find((skill) => skill.slug === slug);
+  return {
+    id: base?.id ?? row.id,
+    slug,
+    name: base?.name ?? row.name,
+    description: base?.description ?? row.description ?? "",
+    category: row.payload?.category ?? base?.category ?? "automation",
+    enabled: row.payload?.enabled ?? base?.enabled ?? true,
+    installed: row.payload?.installed ?? true,
+    userId: row.userId,
+    updatedAt: row.updatedAt.toISOString(),
+  };
 }
 
 export async function listSkills(userId: string) {
-  await ensureIndexes();
-  const storedSkills = await skills().find({ userId }).toArray();
-  const bySlug = new Map(storedSkills.map((skill) => [skill.slug, skill]));
-  return builtInSkills.map((skill) => mergeSkill(skill, bySlug.get(skill.slug)));
+  const rows = await sql<SkillRow[]>`
+    select id, user_id, name, description, payload, created_at, updated_at
+    from skills
+    where user_id = ${userId}
+  `;
+  const bySlug = new Map<string, StoredSkill>();
+  for (const row of rows) {
+    const stored = fromRow(row);
+    if (stored) bySlug.set(stored.slug, stored);
+  }
+  return builtInSkills.map((skill) => bySlug.get(skill.slug) ?? skill);
 }
 
 export async function setSkillEnabled(userId: string, slug: string, enabled: boolean) {
-  await ensureIndexes();
-  const baseSkill = builtInSkills.find((skill) => skill.slug === slug);
-  if (!baseSkill) return null;
+  const base = builtInSkills.find((skill) => skill.slug === slug);
+  if (!base) return null;
 
-  const updatedAt = new Date().toISOString();
-  await skills().updateOne(
-    { userId, slug },
-    {
-      $set: {
-        ...baseSkill,
-        enabled,
-        installed: true,
-        updatedAt,
-      },
-      $setOnInsert: {
-        _id: crypto.randomUUID(),
-        id: baseSkill.id,
-        userId,
-        createdAt: updatedAt,
-      },
-    },
-    { upsert: true },
-  );
+  const payload = {
+    slug,
+    category: base.category,
+    enabled,
+    installed: true,
+  };
 
-  return skills().findOne({ userId, slug });
+  const [row] = await sql<SkillRow[]>`
+    insert into skills (id, user_id, name, description, payload)
+    values (${crypto.randomUUID()}, ${userId}, ${base.name}, ${base.description}, ${sql.json(payload)})
+    on conflict (user_id, (payload->>'slug'))
+    do update set
+      name        = excluded.name,
+      description = excluded.description,
+      payload     = skills.payload || excluded.payload,
+      updated_at  = now()
+    returning id, user_id, name, description, payload, created_at, updated_at
+  `;
+  return fromRow(row);
 }

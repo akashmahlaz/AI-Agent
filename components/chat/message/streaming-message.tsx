@@ -1,9 +1,11 @@
 "use client";
 
 import {
+  createContext,
   lazy,
   memo,
   Suspense,
+  useContext,
   useEffect,
   useMemo,
   useRef,
@@ -622,6 +624,26 @@ function WarningBanner({ ev }: { ev: WarningEvent }) {
   );
 }
 
+function formatStreamErrorMessage(message: string): string {
+  const lower = message.toLowerCase();
+  // Connection reset / Windows OS error 10054 — surface a friendly explanation
+  if (
+    lower.includes("10054") ||
+    lower.includes("connection reset") ||
+    lower.includes("forcibly closed") ||
+    lower.includes("connection closed before message")
+  ) {
+    return "The connection to the AI provider was interrupted mid-stream. This is usually a temporary network issue. You can retry your message.";
+  }
+  if (lower.includes("broken pipe")) {
+    return "The connection to the AI provider was dropped. Please retry your message.";
+  }
+  if (lower.includes("timeout") || lower.includes("timed out")) {
+    return "The request timed out — the model took too long to respond. Try a shorter prompt or retry.";
+  }
+  return message;
+}
+
 function StreamErrorCard({ ev }: { ev: StreamErrorEvent }) {
   return (
     <div className="my-2 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2.5 text-[12.5px] text-destructive">
@@ -632,7 +654,7 @@ function StreamErrorCard({ ev }: { ev: StreamErrorEvent }) {
             {ev.provider ? `${ev.provider} stream error` : "Stream error"}
           </p>
           <p className="mt-0.5 wrap-break-word text-foreground/80">
-            {ev.message}
+            {formatStreamErrorMessage(ev.message)}
           </p>
           {ev.requestId && (
             <p className="mt-1 font-mono text-[10.5px] text-muted-foreground">
@@ -1422,6 +1444,13 @@ function buildSegments(parts: StreamPart[]): RenderSegment[] {
 //   2. StreamingText is wrapped in React.memo so finalized text segments stop
 //      re-rendering once their props stabilize. Only the live tail re-parses.
 // ---------------------------------------------------------------------------
+// During streaming, react-markdown receives the live (unfinalized) tail in a
+// separate render pass. Code blocks and tables in that tail are likely still
+// growing — rendering the full chrome (header bar, syntax highlighter,
+// scrollable card) on every token causes visible layout shift. This context
+// lets per-component overrides skip the heavy chrome until the part is frozen.
+const LiveBlockContext = createContext(false);
+
 function StreamingTextCodeBlock({
   children,
   className,
@@ -1429,6 +1458,7 @@ function StreamingTextCodeBlock({
   children?: React.ReactNode;
   className?: string;
 }) {
+  const isLive = useContext(LiveBlockContext);
   const isInline = !className;
   if (isInline) {
     return (
@@ -1440,14 +1470,45 @@ function StreamingTextCodeBlock({
   const lang = className?.replace("language-", "") ?? "";
   const code = String(children ?? "").replace(/\n$/, "");
 
-  // Render mermaid diagrams as SVG
+  // While the fence is still streaming, render a minimal <pre> with the same
+  // typography as the final code card — no header bar, no copy button, no
+  // syntax-highlight remount per token. This is the Claude / ChatGPT trick:
+  // raw monospace while streaming, swap to highlighted card once the closing
+  // fence arrives.
+  if (isLive) {
+    return (
+      <pre className="my-2 max-h-105 overflow-auto rounded-lg border border-border/40 bg-muted/30 px-3 py-2 font-mono text-[12.5px] leading-relaxed text-foreground/90">
+        <code>{code}</code>
+      </pre>
+    );
+  }
+
+  // Render mermaid diagrams as SVG (only once frozen — partial mermaid never
+  // parses cleanly).
   if (lang === "mermaid" && code.trim()) {
     return <MermaidBlockWrapper code={code} />;
   }
 
   return <CodeBlockFenced code={code} lang={lang} />;
 }
-const STREAMING_MARKDOWN_COMPONENTS = { code: StreamingTextCodeBlock } as const;
+
+// Wide markdown tables would otherwise stretch the reading column and wrap
+// cells mid-word. Wrapping in an overflow container keeps the table on one
+// horizontal row, exactly how ChatGPT and Claude render data.
+function StreamingTextTable({ children }: { children?: React.ReactNode }) {
+  return (
+    <div className="my-2 overflow-x-auto rounded-md border border-border/40">
+      <table className="m-0 w-full border-collapse text-[13.5px]">
+        {children}
+      </table>
+    </div>
+  );
+}
+
+const STREAMING_MARKDOWN_COMPONENTS = {
+  code: StreamingTextCodeBlock,
+  table: StreamingTextTable,
+} as const;
 const STREAMING_REMARK_PLUGINS = [remarkGfm];
 
 // FrozenMarkdown — already-closed paragraphs that will never re-render unless
@@ -1479,18 +1540,24 @@ const StreamingText = memo(function StreamingText({
   // boundary while streaming. Everything before is "frozen" — renders once and
   // stays. Only the trailing partial paragraph re-parses on each token, which
   // is the perf trick that keeps long responses fluid.
-  const { frozen, live } = useMemo(() => {
-    if (!text) return { frozen: "", live: "" };
-    if (!isStreaming) return { frozen: text, live: "" };
-    // Find the last paragraph break that ISN'T inside an open code fence.
+  // `liveRender` is what we actually feed to the markdown parser: if the live
+  // tail has an unclosed fence we synthesize a closing ``` so the parser knows
+  // it's code (not a broken paragraph). The closing token never reaches the
+  // user — the bare <pre> in StreamingTextCodeBlock renders the raw code.
+  const { frozen, live, liveRender } = useMemo(() => {
+    if (!text) return { frozen: "", live: "", liveRender: "" };
+    if (!isStreaming) return { frozen: text, live: "", liveRender: "" };
     const fenceCount = (text.match(/^```/gm) ?? []).length;
     const insideFence = fenceCount % 2 === 1;
-    if (insideFence) return { frozen: "", live: text };
+    if (insideFence) {
+      return { frozen: "", live: text, liveRender: `${text}\n\`\`\`` };
+    }
     const lastBreak = text.lastIndexOf("\n\n");
-    if (lastBreak === -1) return { frozen: "", live: text };
+    if (lastBreak === -1) return { frozen: "", live: text, liveRender: text };
     return {
       frozen: text.slice(0, lastBreak + 2),
       live: text.slice(lastBreak + 2),
+      liveRender: text.slice(lastBreak + 2),
     };
   }, [text, isStreaming]);
 
@@ -1522,10 +1589,17 @@ const StreamingText = memo(function StreamingText({
     return (
       <div
         className={cn(
-          "prose prose-sm max-w-none wrap-break-word leading-relaxed text-foreground",
-          "prose-headings:font-heading prose-headings:text-foreground prose-p:my-1.5",
-          "prose-code:before:content-none prose-code:after:content-none",
+          // Reading body: ~15px / 1.7 line-height, max-w-3xl. Tuned to match
+          // ChatGPT / Claude / VS Code Copilot Chat — wider lines than the
+          // old prose-sm (14px/1.5) which felt cramped on long Rust blocks.
+          "mx-auto max-w-3xl wrap-break-word text-[15px] leading-[1.72] text-foreground",
+          "prose prose-zinc dark:prose-invert prose-p:my-3.5",
+          "prose-headings:font-heading prose-headings:text-foreground prose-headings:font-semibold prose-headings:tracking-tight",
+          "prose-h1:text-2xl prose-h1:mt-6 prose-h1:mb-3 prose-h2:text-xl prose-h2:mt-5 prose-h2:mb-3 prose-h3:text-lg prose-h3:mt-4 prose-h3:mb-2",
+          "prose-strong:text-foreground prose-strong:font-semibold",
+          "prose-code:before:content-none prose-code:after:content-none prose-code:font-medium",
           "prose-pre:m-0 prose-pre:bg-transparent prose-pre:p-0",
+          "prose-li:my-1 prose-ul:my-3 prose-ol:my-3",
           "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
         )}
       >
@@ -1547,24 +1621,29 @@ const StreamingText = memo(function StreamingText({
   return (
     <div
       className={cn(
-        "prose prose-sm max-w-none wrap-break-word leading-relaxed text-foreground",
-        "prose-headings:font-heading prose-headings:text-foreground prose-p:my-1.5",
-        "prose-code:before:content-none prose-code:after:content-none",
+        "mx-auto max-w-3xl wrap-break-word text-[15px] leading-[1.72] text-foreground",
+        "prose prose-zinc dark:prose-invert prose-p:my-3.5",
+        "prose-headings:font-heading prose-headings:text-foreground prose-headings:font-semibold prose-headings:tracking-tight",
+        "prose-h1:text-2xl prose-h1:mt-6 prose-h1:mb-3 prose-h2:text-xl prose-h2:mt-5 prose-h2:mb-3 prose-h3:text-lg prose-h3:mt-4 prose-h3:mb-2",
+        "prose-strong:text-foreground prose-strong:font-semibold",
+        "prose-code:before:content-none prose-code:after:content-none prose-code:font-medium",
         "prose-pre:m-0 prose-pre:bg-transparent prose-pre:p-0",
+        "prose-li:my-1 prose-ul:my-3 prose-ol:my-3",
         "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
       )}
     >
       {frozen && <FrozenMarkdown text={frozen} />}
       {live && (
-        <Markdown
-          remarkPlugins={STREAMING_REMARK_PLUGINS}
-          components={STREAMING_MARKDOWN_COMPONENTS}
-        >
-          {live}
-        </Markdown>
-      )}
-      {isStreaming && (
-        <span className="ml-0.5 inline-block h-4 w-0.5 animate-(--animate-blink) align-text-bottom bg-foreground" />
+        <div className={cn(isStreaming && "streaming-live")}>
+          <LiveBlockContext.Provider value={isStreaming}>
+            <Markdown
+              remarkPlugins={STREAMING_REMARK_PLUGINS}
+              components={STREAMING_MARKDOWN_COMPONENTS}
+            >
+              {liveRender}
+            </Markdown>
+          </LiveBlockContext.Provider>
+        </div>
       )}
     </div>
   );
@@ -1577,7 +1656,7 @@ function UserMessage({ text }: { text: string }) {
   return (
     <div className="group/user mt-4 mb-2 flex justify-end">
       <div className="max-w-[80%] rounded-2xl rounded-tr-sm bg-muted/70 px-4 py-2.5">
-        <p className="whitespace-pre-wrap wrap-break-word text-[14px] leading-relaxed text-foreground">
+        <p className="whitespace-pre-wrap wrap-break-word text-[15px] leading-[1.65] text-foreground">
           {text}
         </p>
       </div>

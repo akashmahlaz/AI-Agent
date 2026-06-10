@@ -1,64 +1,74 @@
-import { collections } from "@/lib/db-collections";
+import sql from "@/lib/pg";
 import { builtInIntegrations } from "@/lib/integrations";
 import type { Integration } from "@/lib/types";
-import type { Document } from "mongodb";
 
-export interface StoredIntegration extends Document, Integration {
-  _id: string;
+export interface StoredIntegration extends Integration {
   userId: string;
   credentials?: Record<string, string>;
   createdAt: string;
   updatedAt: string;
 }
 
-const integrations = () => collections.integrations<StoredIntegration>();
-
-let indexesReady: Promise<void> | null = null;
-
-function ensureIndexes() {
-  indexesReady ??= Promise.all([
-    integrations().createIndex({ userId: 1, slug: 1 }, { unique: true }),
-    integrations().createIndex({ userId: 1, category: 1 }),
-  ]).then(() => undefined);
-  return indexesReady;
+interface IntegrationRow {
+  id: string;
+  userId: string;
+  provider: string;
+  state: {
+    connected?: boolean;
+    credentials?: Record<string, string>;
+  } | null;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
-function mergeIntegration(baseIntegration: Integration, storedIntegration?: StoredIntegration): Integration {
-  return storedIntegration
-    ? { ...baseIntegration, id: storedIntegration.id || storedIntegration._id, connected: storedIntegration.connected }
-    : baseIntegration;
+function fromRow(row: IntegrationRow): StoredIntegration | null {
+  const base = builtInIntegrations.find((entry) => entry.slug === row.provider);
+  if (!base) return null;
+  const state = row.state ?? {};
+  return {
+    ...base,
+    userId: row.userId,
+    connected: state.connected === true,
+    credentials: state.credentials,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
 }
 
 export async function listIntegrations(userId: string) {
-  await ensureIndexes();
-  const storedIntegrations = await integrations().find({ userId }).toArray();
-  const bySlug = new Map(storedIntegrations.map((integration) => [integration.slug, integration]));
-  return builtInIntegrations.map((integration) => mergeIntegration(integration, bySlug.get(integration.slug)));
+  const rows = await sql<IntegrationRow[]>`
+    select id, user_id, provider, state, created_at, updated_at
+    from integrations
+    where user_id = ${userId}
+  `;
+  const bySlug = new Map<string, StoredIntegration>();
+  for (const row of rows) {
+    const integration = fromRow(row);
+    if (integration) bySlug.set(integration.slug, integration);
+  }
+  return builtInIntegrations.map((integration) => bySlug.get(integration.slug) ?? integration);
 }
 
-export async function upsertIntegration(userId: string, slug: string, patch: Partial<Pick<StoredIntegration, "connected" | "credentials">>) {
-  await ensureIndexes();
-  const baseIntegration = builtInIntegrations.find((integration) => integration.slug === slug);
-  if (!baseIntegration) return null;
+export async function upsertIntegration(
+  userId: string,
+  slug: string,
+  patch: Partial<Pick<StoredIntegration, "connected" | "credentials">>,
+) {
+  const base = builtInIntegrations.find((integration) => integration.slug === slug);
+  if (!base) return null;
 
-  const updatedAt = new Date().toISOString();
-  await integrations().updateOne(
-    { userId, slug },
-    {
-      $set: {
-        ...baseIntegration,
-        ...patch,
-        updatedAt,
-      },
-      $setOnInsert: {
-        _id: crypto.randomUUID(),
-        id: baseIntegration.id,
-        userId,
-        createdAt: updatedAt,
-      },
-    },
-    { upsert: true },
-  );
+  const stateDelta: Record<string, unknown> = {};
+  if (patch.connected !== undefined) stateDelta.connected = patch.connected;
+  if (patch.credentials !== undefined) stateDelta.credentials = patch.credentials;
 
-  return integrations().findOne({ userId, slug });
+  const [row] = await sql<IntegrationRow[]>`
+    insert into integrations (id, user_id, provider, state)
+    values (${crypto.randomUUID()}, ${userId}, ${slug}, ${sql.json(stateDelta as never)})
+    on conflict (user_id, provider)
+    do update set
+      state      = integrations.state || excluded.state,
+      updated_at = now()
+    returning id, user_id, provider, state, created_at, updated_at
+  `;
+  return fromRow(row);
 }

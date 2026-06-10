@@ -30,7 +30,7 @@ const STREAM_PART_TYPES = new Set<ContentPartType>([
 ]);
 
 /**
- * Hydrate persisted UIMessage `parts` from MongoDB back into StreamPart[]
+ * Hydrate persisted UIMessage `parts` from Postgres back into StreamPart[]
  * shapes that the streaming renderer understands. Used when reloading a
  * past conversation in the chat / coding views.
  */

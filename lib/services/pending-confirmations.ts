@@ -10,16 +10,15 @@
  *   2. The model calls `confirm_action({ token, approve: true })`. The pending
  *      action is looked up, validated against the same userId, and executed.
  *
- * Tokens live in MongoDB (collection `pending_confirmations`) so they survive
- * server restarts and are scoped per user. TTL = 10 minutes.
+ * Tokens live in PostgreSQL (`pending_confirmations`) so they survive server
+ * restarts and are scoped per user. TTL = 10 minutes (enforced on read).
  */
 
 import { randomBytes } from "node:crypto";
-import { type Document } from "mongodb";
-import { collections } from "@/lib/db-collections";
+import sql from "@/lib/pg";
 
-export interface PendingAction extends Document {
-  _id: string;
+export interface PendingAction {
+  token: string;
   userId: string;
   tool: string;
   args: Record<string, unknown>;
@@ -29,21 +28,15 @@ export interface PendingAction extends Document {
 }
 
 const TTL_SECONDS = 60 * 10;
-let indexEnsured: Promise<void> | null = null;
 
-function collection() {
-  return collections.collection<PendingAction>("pendingConfirmations");
-}
-
-async function ensureIndex() {
-  if (!indexEnsured) {
-    indexEnsured = (async () => {
-      const col = collection();
-      await col.createIndex({ userId: 1 });
-      await col.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
-    })();
-  }
-  return indexEnsured;
+interface PendingRow {
+  token: string;
+  userId: string;
+  tool: string;
+  args: Record<string, unknown>;
+  summary: string;
+  createdAt: Date;
+  expiresAt: Date;
 }
 
 export async function createPendingConfirmation(input: {
@@ -51,20 +44,27 @@ export async function createPendingConfirmation(input: {
   tool: string;
   args: Record<string, unknown>;
   summary: string;
-}): Promise<{ token: string; expiresAt: string; requires_confirmation: true; summary: string }> {
-  await ensureIndex();
+}): Promise<{
+  token: string;
+  expiresAt: string;
+  requires_confirmation: true;
+  summary: string;
+}> {
   const token = randomBytes(12).toString("base64url");
   const expiresAt = new Date(Date.now() + TTL_SECONDS * 1000);
-  const col = collection();
-  await col.insertOne({
-    _id: token,
-    userId: input.userId,
-    tool: input.tool,
-    args: input.args,
-    summary: input.summary,
-    createdAt: new Date().toISOString(),
-    expiresAt,
-  });
+
+  await sql`
+    insert into pending_confirmations (token, user_id, tool, args, summary, expires_at)
+    values (
+      ${token},
+      ${input.userId},
+      ${input.tool},
+      ${sql.json(input.args as never)},
+      ${input.summary},
+      ${expiresAt}
+    )
+  `;
+
   return {
     requires_confirmation: true,
     token,
@@ -73,11 +73,30 @@ export async function createPendingConfirmation(input: {
   };
 }
 
-export async function consumePendingConfirmation(userId: string, token: string): Promise<PendingAction | null> {
-  await ensureIndex();
-  const col = collection();
-  const doc = await col.findOneAndDelete({ _id: token, userId });
-  if (!doc) return null;
-  if (doc.expiresAt.getTime() < Date.now()) return null;
-  return doc;
+export async function consumePendingConfirmation(
+  userId: string,
+  token: string,
+): Promise<PendingAction | null> {
+  // Atomic claim-and-delete: only succeeds if token belongs to user and is unexpired.
+  const [row] = await sql<PendingRow[]>`
+    delete from pending_confirmations
+    where token   = ${token}
+      and user_id = ${userId}
+      and expires_at >= now()
+    returning token, user_id, tool, args, summary, created_at, expires_at
+  `;
+
+  // Best-effort cleanup of expired rows for everyone.
+  void sql`delete from pending_confirmations where expires_at < now()`.catch(() => undefined);
+
+  if (!row) return null;
+  return {
+    token: row.token,
+    userId: row.userId,
+    tool: row.tool,
+    args: row.args,
+    summary: row.summary,
+    createdAt: row.createdAt.toISOString(),
+    expiresAt: row.expiresAt,
+  };
 }

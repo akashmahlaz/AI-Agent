@@ -1,5 +1,4 @@
-import { collections } from "@/lib/db-collections";
-import type { Document } from "mongodb";
+import sql from "@/lib/pg";
 
 export type CommunicationStyle =
   | "friendly"
@@ -17,21 +16,14 @@ export interface PersonaSettings {
   // Identity
   aiName: string;
   userNickname?: string;
-  /** Optional: override the default AI model for this user */
   model?: string;
-  /** Optional: custom system prompt tail appended per user */
   systemPromptTail?: string;
 
   // Model parameters
-  /** Sampling temperature 0–2 (0.8 = default) */
   temperature?: number;
-  /** Nucleus sampling threshold 0–1 */
   topP?: number;
-  /** Frequency penalty -2–2 */
   frequencyPenalty?: number;
-  /** Presence penalty -2–2 */
   presencePenalty?: number;
-  /** Max tokens per response (0 = no override) */
   maxTokens?: number;
 
   // Communication
@@ -48,7 +40,7 @@ export interface PersonaSettings {
   voiceNotes: boolean;
   timezone?: string;
 
-  // Channel overrides (e.g. whatsapp gets a shorter, punchier config)
+  // Channel overrides
   channelOverrides?: Partial<Record<string, Partial<PersonaSettings>>>;
 }
 
@@ -73,8 +65,8 @@ export const DEFAULT_PERSONA: PersonaSettings = {
   systemPromptTail: undefined,
 };
 
-export interface StoredUserSettings extends Document {
-  _id: string;
+export interface StoredUserSettings {
+  id: string;
   userId: string;
   defaultModel?: string;
   persona?: Partial<PersonaSettings>;
@@ -82,32 +74,48 @@ export interface StoredUserSettings extends Document {
   updatedAt: string;
 }
 
-const userSettings = () => collections.userSettings<StoredUserSettings>();
-
-let indexesReady: Promise<void> | null = null;
-
-function ensureIndexes() {
-  indexesReady ??= userSettings().createIndex({ userId: 1 }, { unique: true }).then(() => undefined);
-  return indexesReady;
+interface UserSettingsRow {
+  id: string;
+  userId: string;
+  defaultModel: string | null;
+  payload: {
+    persona?: Partial<PersonaSettings>;
+  } | null;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
-export async function getUserSettings(userId: string) {
-  await ensureIndexes();
-  return userSettings().findOne({ userId });
+function fromRow(row: UserSettingsRow): StoredUserSettings {
+  return {
+    id: row.id,
+    userId: row.userId,
+    defaultModel: row.defaultModel ?? undefined,
+    persona: row.payload?.persona,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+export async function getUserSettings(userId: string): Promise<StoredUserSettings | null> {
+  const [row] = await sql<UserSettingsRow[]>`
+    select id, user_id, default_model, payload, created_at, updated_at
+    from user_settings
+    where user_id = ${userId}
+    limit 1
+  `;
+  return row ? fromRow(row) : null;
 }
 
 export async function setDefaultModel(userId: string, defaultModel: string) {
-  await ensureIndexes();
-  const now = new Date().toISOString();
-  await userSettings().updateOne(
-    { userId },
-    {
-      $set: { defaultModel, updatedAt: now },
-      $setOnInsert: { _id: crypto.randomUUID(), userId, createdAt: now },
-    },
-    { upsert: true },
-  );
-  return userSettings().findOne({ userId });
+  const [row] = await sql<UserSettingsRow[]>`
+    insert into user_settings (id, user_id, default_model, payload)
+    values (${crypto.randomUUID()}, ${userId}, ${defaultModel}, ${sql.json({})})
+    on conflict (user_id) do update set
+      default_model = excluded.default_model,
+      updated_at    = now()
+    returning id, user_id, default_model, payload, created_at, updated_at
+  `;
+  return fromRow(row);
 }
 
 function sanitizeStyle(value: unknown): CommunicationStyle {
@@ -153,7 +161,8 @@ export function normalizePersona(input: Partial<PersonaSettings> | null | undefi
   const source = input ?? {};
   return {
     aiName: sanitizeName(source.aiName, DEFAULT_PERSONA.aiName, 32),
-    userNickname: typeof source.userNickname === "string" ? source.userNickname.trim().slice(0, 48) : "",
+    userNickname:
+      typeof source.userNickname === "string" ? source.userNickname.trim().slice(0, 48) : "",
     communicationStyle: sanitizeStyle(source.communicationStyle),
     languagePreference: sanitizeLanguage(source.languagePreference),
     memoryEnabled: source.memoryEnabled !== false,
@@ -164,14 +173,17 @@ export function normalizePersona(input: Partial<PersonaSettings> | null | undefi
     expressiveReplies: source.expressiveReplies === true,
     voiceNotes: source.voiceNotes === true,
     timezone: typeof source.timezone === "string" ? source.timezone.slice(0, 64) : undefined,
-    // Model params — preserve undefined if not set
     model: typeof source.model === "string" && source.model.length > 0 ? source.model : undefined,
     temperature: typeof source.temperature === "number" ? source.temperature : undefined,
     topP: typeof source.topP === "number" ? source.topP : undefined,
-    maxTokens: typeof source.maxTokens === "number" && source.maxTokens > 0 ? source.maxTokens : undefined,
-    frequencyPenalty: typeof source.frequencyPenalty === "number" ? source.frequencyPenalty : undefined,
-    presencePenalty: typeof source.presencePenalty === "number" ? source.presencePenalty : undefined,
-    systemPromptTail: typeof source.systemPromptTail === "string" ? source.systemPromptTail : undefined,
+    maxTokens:
+      typeof source.maxTokens === "number" && source.maxTokens > 0 ? source.maxTokens : undefined,
+    frequencyPenalty:
+      typeof source.frequencyPenalty === "number" ? source.frequencyPenalty : undefined,
+    presencePenalty:
+      typeof source.presencePenalty === "number" ? source.presencePenalty : undefined,
+    systemPromptTail:
+      typeof source.systemPromptTail === "string" ? source.systemPromptTail : undefined,
   };
 }
 
@@ -180,7 +192,10 @@ export async function getPersona(userId: string): Promise<PersonaSettings> {
   return normalizePersona(settings?.persona);
 }
 
-export async function getPersonaForChannel(userId: string, channel?: string | null): Promise<PersonaSettings> {
+export async function getPersonaForChannel(
+  userId: string,
+  channel?: string | null,
+): Promise<PersonaSettings> {
   const base = await getPersona(userId);
   if (!channel) return base;
   const override = base.channelOverrides?.[channel];
@@ -189,17 +204,15 @@ export async function getPersonaForChannel(userId: string, channel?: string | nu
 }
 
 export async function setPersona(userId: string, persona: Partial<PersonaSettings>) {
-  await ensureIndexes();
   const merged = normalizePersona({ ...(await getPersona(userId)), ...persona });
-  const now = new Date().toISOString();
-  await userSettings().updateOne(
-    { userId },
-    {
-      $set: { persona: merged, updatedAt: now },
-      $setOnInsert: { _id: crypto.randomUUID(), userId, createdAt: now },
-    },
-    { upsert: true },
-  );
+  const payload = { persona: merged };
+  await sql`
+    insert into user_settings (id, user_id, payload)
+    values (${crypto.randomUUID()}, ${userId}, ${sql.json(payload as never)})
+    on conflict (user_id) do update set
+      payload    = user_settings.payload || excluded.payload,
+      updated_at = now()
+  `;
   return merged;
 }
 
@@ -233,7 +246,9 @@ export function buildPersonaSystemPrompt(persona: PersonaSettings): string {
     lines.push("Avoid emojis, exclamation spam, and decorative formatting.");
   }
   if (!persona.memoryEnabled) {
-    lines.push("Long-term memory is disabled by the user; do not call memory_remember and ignore stored memory context.");
+    lines.push(
+      "Long-term memory is disabled by the user; do not call memory_remember and ignore stored memory context.",
+    );
   }
   if (persona.timezone) {
     lines.push(`User timezone: ${persona.timezone}.`);

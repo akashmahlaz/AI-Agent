@@ -40,13 +40,13 @@ fn to_anthropic_messages(messages: &[ChatMessage]) -> Value {
                     "content": [{
                         "type": "tool_result",
                         "tool_use_id": msg.tool_call_id,
-                        "content": msg.content.as_deref().unwrap_or(""),
+                        "content": msg.text_content().unwrap_or(""),
                     }]
                 }));
             }
             "assistant" => {
                 let mut content: Vec<Value> = Vec::new();
-                if let Some(text) = msg.content.as_deref().filter(|text| !text.is_empty()) {
+                if let Some(text) = msg.text_content().filter(|text| !text.is_empty()) {
                     content.push(json!({ "type": "text", "text": text }));
                 }
                 if let Some(tool_calls) = &msg.tool_calls {
@@ -66,10 +66,40 @@ fn to_anthropic_messages(messages: &[ChatMessage]) -> Value {
                 }
             }
             _ => {
-                out.push(json!({
-                    "role": "user",
-                    "content": msg.content.as_deref().unwrap_or(""),
-                }));
+                // User role: support both plain string content AND OpenAI-style
+                // structured parts arrays (translate `image_url` parts into
+                // Anthropic's native `{type:"image", source:{type:"url",url}}`).
+                match msg.content.as_ref() {
+                    Some(Value::Array(parts)) => {
+                        let translated: Vec<Value> = parts
+                            .iter()
+                            .map(|p| {
+                                let kind = p.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                                if kind == "image_url" {
+                                    let url = p
+                                        .pointer("/image_url/url")
+                                        .and_then(|u| u.as_str())
+                                        .unwrap_or("");
+                                    json!({
+                                        "type": "image",
+                                        "source": { "type": "url", "url": url },
+                                    })
+                                } else {
+                                    // Pass through {type:"text",text} and any
+                                    // other already-Anthropic-shaped parts.
+                                    p.clone()
+                                }
+                            })
+                            .collect();
+                        out.push(json!({ "role": "user", "content": translated }));
+                    }
+                    Some(Value::String(s)) => {
+                        out.push(json!({ "role": "user", "content": s }));
+                    }
+                    _ => {
+                        out.push(json!({ "role": "user", "content": "" }));
+                    }
+                }
             }
         }
     }
@@ -113,7 +143,7 @@ pub async fn stream_chat(
     let system_text = messages
         .iter()
         .find(|message| message.role == "system")
-        .and_then(|message| message.content.as_deref())
+        .and_then(|message| message.text_content())
         .unwrap_or("");
 
     let mut body = json!({
@@ -217,17 +247,55 @@ fn retry_after_delay(response: &Response) -> Option<Duration> {
     Some(Duration::from_secs_f64(seconds.max(0.0)))
 }
 
+fn is_connection_reset(err: &reqwest::Error) -> bool {
+    let msg = err.to_string().to_ascii_lowercase();
+    // Windows: os error 10054 = WSAECONNRESET
+    // Linux: os error 104 = ECONNRESET
+    msg.contains("10054")
+        || msg.contains("os error 104")
+        || msg.contains("connection reset")
+        || msg.contains("forcibly closed")
+        || msg.contains("connection closed before message completed")
+        || msg.contains("broken pipe")
+}
+
 fn parse_anthropic_sse(
     upstream: impl Stream<Item = reqwest::Result<Bytes>> + Send + 'static + Unpin,
 ) -> impl Stream<Item = Result<OpenAiEvent>> {
-    async_stream::try_stream! {
+    async_stream::stream! {
         let mut upstream = upstream;
         let mut buffer = String::new();
         let mut tool_blocks: HashMap<usize, (String, String, String)> = HashMap::new();
         let mut current_block_index: usize = 0;
+        let mut emitted_content = false;
 
-        while let Some(chunk) = upstream.next().await {
-            let chunk = chunk.context("reading Anthropic stream")?;
+        while let Some(chunk_result) = upstream.next().await {
+            let chunk = match chunk_result {
+                Ok(b) => b,
+                Err(err) => {
+                    if is_connection_reset(&err) {
+                        tracing::warn!(
+                            error = %err,
+                            emitted_content,
+                            "Anthropic stream: connection reset by remote host"
+                        );
+                        yield Ok(OpenAiEvent::StreamInterrupted {
+                            retriable: !emitted_content,
+                            message: format!(
+                                "Connection was reset by Anthropic's servers mid-stream. {}",
+                                if emitted_content {
+                                    "Response was partially delivered."
+                                } else {
+                                    "No content was lost — retrying automatically."
+                                }
+                            ),
+                        });
+                    } else {
+                        yield Err(anyhow::Error::from(err).context("reading Anthropic stream"));
+                    }
+                    return;
+                }
+            };
             buffer.push_str(&String::from_utf8_lossy(&chunk));
 
             loop {
@@ -258,11 +326,11 @@ fn parse_anthropic_sse(
                 match event_type.as_str() {
                     "message_start" => {
                         if let Some((input_tokens, output_tokens)) = usage_tokens(data.get("message").and_then(|message| message.get("usage"))) {
-                            yield OpenAiEvent::Usage {
+                            yield Ok(OpenAiEvent::Usage {
                                 prompt_tokens: input_tokens,
                                 completion_tokens: output_tokens,
                                 total_tokens: input_tokens + output_tokens,
-                            };
+                            });
                         }
                     }
                     "content_block_start" => {
@@ -275,7 +343,8 @@ fn parse_anthropic_sse(
                             let id = block.get("id").and_then(Value::as_str).unwrap_or("").to_owned();
                             let name = block.get("name").and_then(Value::as_str).unwrap_or("").to_owned();
                             tool_blocks.insert(index, (id.clone(), name.clone(), String::new()));
-                            yield OpenAiEvent::ToolCallBegin { index, id, name };
+                            emitted_content = true;
+                            yield Ok(OpenAiEvent::ToolCallBegin { index, id, name });
                         }
                     }
                     "content_block_delta" => {
@@ -288,21 +357,23 @@ fn parse_anthropic_sse(
 
                         if delta_type == "text_delta" {
                             if let Some(text) = delta.get("text").and_then(Value::as_str).filter(|text| !text.is_empty()) {
-                                yield OpenAiEvent::TextDelta(text.to_owned());
+                                emitted_content = true;
+                                yield Ok(OpenAiEvent::TextDelta(text.to_owned()));
                             }
                         } else if delta_type == "thinking_delta" {
                             if let Some(text) = delta.get("thinking").and_then(Value::as_str).filter(|text| !text.is_empty()) {
-                                yield OpenAiEvent::ReasoningDelta(text.to_owned());
+                                emitted_content = true;
+                                yield Ok(OpenAiEvent::ReasoningDelta(text.to_owned()));
                             }
                         } else if delta_type == "input_json_delta" {
                             if let Some(partial) = delta.get("partial_json").and_then(Value::as_str) {
                                 if let Some(entry) = tool_blocks.get_mut(&index) {
                                     entry.2.push_str(partial);
                                     if !entry.0.is_empty() && !entry.1.is_empty() && !entry.2.is_empty() {
-                                        yield OpenAiEvent::ToolCallInputDelta {
+                                        yield Ok(OpenAiEvent::ToolCallInputDelta {
                                             id: entry.0.clone(),
                                             arguments: entry.2.clone(),
-                                        };
+                                        });
                                     }
                                 }
                             }
@@ -310,11 +381,11 @@ fn parse_anthropic_sse(
                     }
                     "message_delta" => {
                         if let Some((input_tokens, output_tokens)) = usage_tokens(data.get("usage")) {
-                            yield OpenAiEvent::Usage {
+                            yield Ok(OpenAiEvent::Usage {
                                 prompt_tokens: input_tokens,
                                 completion_tokens: output_tokens,
                                 total_tokens: input_tokens + output_tokens,
-                            };
+                            });
                         }
                     }
                     "message_stop" => {
@@ -334,10 +405,10 @@ fn parse_anthropic_sse(
                             }
                         }
                         let finish_reason = if tool_calls.is_empty() { "stop" } else { "tool_calls" };
-                        yield OpenAiEvent::Finished {
+                        yield Ok(OpenAiEvent::Finished {
                             finish_reason: finish_reason.to_owned(),
                             tool_calls,
-                        };
+                        });
                         return;
                     }
                     _ => {}

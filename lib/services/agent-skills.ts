@@ -1,5 +1,4 @@
-import { collections } from "@/lib/db-collections";
-import type { Document } from "mongodb";
+import sql from "@/lib/pg";
 
 /**
  * Agent skills — Hermes-style procedural memory.
@@ -31,7 +30,6 @@ export interface AgentSkill {
   description: string;
   tags: string[];
   steps: AgentSkillStep[];
-  /** Comma-free hint string the planner can use during recall. */
   trigger: string;
   invocationCount: number;
   successCount: number;
@@ -42,49 +40,85 @@ export interface AgentSkill {
   updatedAt: string;
 }
 
-interface StoredAgentSkill extends Document, AgentSkill {
-  _id: string;
+interface AgentSkillRow {
+  id: string;
+  userId: string;
+  name: string;
+  description: string | null;
+  trigger: string | null;
+  tags: string[] | null;
+  steps: AgentSkillStep[] | null;
+  invocationCount: number;
+  successCount: number;
+  failureCount: number;
+  lastUsedAt: Date | null;
+  shareSlug: string | null;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
-const skills = () => collections.agentSkills<StoredAgentSkill>();
-
-let indexesReady: Promise<void> | null = null;
-function ensureIndexes() {
-  indexesReady ??= Promise.all([
-    skills().createIndex({ userId: 1, name: 1 }, { unique: true }),
-    skills().createIndex({ userId: 1, tags: 1 }),
-    skills().createIndex({ shareSlug: 1 }, { unique: true, sparse: true }),
-  ]).then(() => undefined);
-  return indexesReady;
-}
-
-function newId() {
-  return crypto.randomUUID();
+function fromRow(row: AgentSkillRow): AgentSkill {
+  return {
+    id: row.id,
+    userId: row.userId,
+    name: row.name,
+    description: row.description ?? "",
+    tags: row.tags ?? [],
+    steps: row.steps ?? [],
+    trigger: row.trigger ?? row.description ?? "",
+    invocationCount: row.invocationCount,
+    successCount: row.successCount,
+    failureCount: row.failureCount,
+    lastUsedAt: row.lastUsedAt ? row.lastUsedAt.toISOString() : null,
+    shareSlug: row.shareSlug,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
 }
 
 export async function listAgentSkills(userId: string): Promise<AgentSkill[]> {
-  await ensureIndexes();
-  const docs = await skills().find({ userId }).sort({ updatedAt: -1 }).limit(200).toArray();
-  return docs.map(stripStored);
+  const rows = await sql<AgentSkillRow[]>`
+    select id, user_id, name, description, trigger, tags, steps,
+           invocation_count, success_count, failure_count,
+           last_used_at, null::text as share_slug,
+           created_at, updated_at
+    from agent_skills
+    where user_id = ${userId}
+    order by updated_at desc
+    limit 200
+  `;
+  return rows.map(fromRow);
 }
 
-export async function searchAgentSkills(userId: string, query: string, limit = 8): Promise<AgentSkill[]> {
-  await ensureIndexes();
+export async function searchAgentSkills(
+  userId: string,
+  query: string,
+  limit = 8,
+): Promise<AgentSkill[]> {
   const tokens = query
     .toLowerCase()
     .split(/[^a-z0-9]+/)
     .filter((t) => t.length >= 3);
   if (tokens.length === 0) return listAgentSkills(userId);
-  const regex = new RegExp(tokens.map(escapeRegex).join("|"), "i");
-  const docs = await skills()
-    .find({
-      userId,
-      $or: [{ name: regex }, { description: regex }, { trigger: regex }, { tags: { $in: tokens } }],
-    })
-    .sort({ invocationCount: -1, updatedAt: -1 })
-    .limit(limit)
-    .toArray();
-  return docs.map(stripStored);
+
+  const pattern = `%${tokens.join("%")}%`;
+  const rows = await sql<AgentSkillRow[]>`
+    select id, user_id, name, description, trigger, tags, steps,
+           invocation_count, success_count, failure_count,
+           last_used_at, null::text as share_slug,
+           created_at, updated_at
+    from agent_skills
+    where user_id = ${userId}
+      and (
+        lower(name) like ${pattern}
+        or lower(coalesce(description, '')) like ${pattern}
+        or lower(coalesce(trigger, '')) like ${pattern}
+        or tags && ${tokens}::text[]
+      )
+    order by invocation_count desc, updated_at desc
+    limit ${limit}
+  `;
+  return rows.map(fromRow);
 }
 
 export async function saveAgentSkill(
@@ -97,40 +131,31 @@ export async function saveAgentSkill(
     trigger?: string;
   },
 ): Promise<AgentSkill> {
-  await ensureIndexes();
-  const now = new Date().toISOString();
-  const existing = await skills().findOne({ userId, name: input.name });
-  if (existing) {
-    const updated: AgentSkill = {
-      ...stripStored(existing),
-      description: input.description,
-      steps: input.steps,
-      tags: input.tags ?? existing.tags ?? [],
-      trigger: input.trigger ?? existing.trigger ?? input.description,
-      updatedAt: now,
-    };
-    await skills().updateOne({ _id: existing._id }, { $set: updated });
-    return updated;
-  }
-  const doc: StoredAgentSkill = {
-    _id: newId(),
-    id: newId(),
-    userId,
-    name: input.name,
-    description: input.description,
-    tags: input.tags ?? [],
-    steps: input.steps,
-    trigger: input.trigger ?? input.description,
-    invocationCount: 0,
-    successCount: 0,
-    failureCount: 0,
-    lastUsedAt: null,
-    shareSlug: null,
-    createdAt: now,
-    updatedAt: now,
-  };
-  await skills().insertOne(doc);
-  return stripStored(doc);
+  const id = crypto.randomUUID();
+  const [row] = await sql<AgentSkillRow[]>`
+    insert into agent_skills (
+      id, user_id, name, description, trigger, tags, steps
+    ) values (
+      ${id},
+      ${userId},
+      ${input.name},
+      ${input.description},
+      ${input.trigger ?? input.description},
+      ${input.tags ?? []}::text[],
+      ${sql.json(input.steps as never)}
+    )
+    on conflict (user_id, name) do update set
+      description = excluded.description,
+      trigger     = excluded.trigger,
+      tags        = excluded.tags,
+      steps       = excluded.steps,
+      updated_at  = now()
+    returning id, user_id, name, description, trigger, tags, steps,
+              invocation_count, success_count, failure_count,
+              last_used_at, null::text as share_slug,
+              created_at, updated_at
+  `;
+  return fromRow(row);
 }
 
 export async function recordAgentSkillRun(
@@ -138,29 +163,28 @@ export async function recordAgentSkillRun(
   name: string,
   outcome: "success" | "failure",
 ): Promise<void> {
-  await ensureIndexes();
-  const inc =
-    outcome === "success"
-      ? { invocationCount: 1, successCount: 1 }
-      : { invocationCount: 1, failureCount: 1 };
-  await skills().updateOne(
-    { userId, name },
-    { $inc: inc, $set: { lastUsedAt: new Date().toISOString() } },
-  );
+  if (outcome === "success") {
+    await sql`
+      update agent_skills
+      set invocation_count = invocation_count + 1,
+          success_count    = success_count + 1,
+          last_used_at     = now()
+      where user_id = ${userId} and name = ${name}
+    `;
+  } else {
+    await sql`
+      update agent_skills
+      set invocation_count = invocation_count + 1,
+          failure_count    = failure_count + 1,
+          last_used_at     = now()
+      where user_id = ${userId} and name = ${name}
+    `;
+  }
 }
 
 export async function deleteAgentSkill(userId: string, name: string): Promise<boolean> {
-  await ensureIndexes();
-  const result = await skills().deleteOne({ userId, name });
-  return result.deletedCount === 1;
-}
-
-function stripStored(doc: StoredAgentSkill): AgentSkill {
-  const { _id: _ignored, ...rest } = doc;
-  void _ignored;
-  return rest;
-}
-
-function escapeRegex(input: string): string {
-  return input.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const result = await sql`
+    delete from agent_skills where user_id = ${userId} and name = ${name}
+  `;
+  return result.count === 1;
 }

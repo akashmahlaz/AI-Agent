@@ -11,10 +11,12 @@ mod uploads;
 
 use axum::{
     Router,
+    extract::DefaultBodyLimit,
     http::{HeaderValue, Method, header},
     routing::{delete, get, patch, post},
 };
 use tower_http::cors::CorsLayer;
+use tower_http::services::ServeDir;
 
 use crate::state::AppState;
 
@@ -48,7 +50,19 @@ pub fn router(state: AppState) -> Router {
         .route("/integrations/github/status", get(integrations::github_status))
         .route("/integrations/whatsapp/onboarding", get(integrations::whatsapp_onboarding))
         .route("/integrations/whatsapp", post(integrations::whatsapp_action))
-        .route("/uploads", post(uploads::create_upload))
+        .route(
+            "/uploads",
+            post(uploads::create_upload)
+                // Axum's default request body limit is 2 MiB which silently
+                // 413's typical screenshots/PDFs before our own size check
+                // runs. Bump it to a roomy 25 MiB just for this route; the
+                // handler still enforces a stricter 10 MiB cap on the file
+                // bytes themselves.
+                .layer(DefaultBodyLimit::max(25 * 1024 * 1024)),
+        )
+        // Serve locally-stored uploads (used as S3 fallback in dev when
+        // AWS credentials are not configured).
+        .nest_service("/local-uploads", ServeDir::new(uploads::LOCAL_UPLOADS_DIR))
         .route("/admin/usage", get(admin::usage_summary))
         .route("/admin/logs", get(admin::logs))
         .route("/admin/agents", get(admin::agents))
