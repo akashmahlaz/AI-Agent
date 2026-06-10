@@ -19,7 +19,8 @@ RUN rm -f rust-toolchain.toml
 RUN cargo build --release
 
 # ── Stage 2: Minimal runtime ──────────────────────────────────────────────────
-FROM debian:bookworm-slim AS runner
+# Use the same Debian version as the builder to avoid glibc mismatch
+FROM rust:latest AS runner
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \

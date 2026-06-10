@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev --webpack",
     "db:up": "docker compose up -d postgres",
     "db:down": "docker compose down",
     "rust:dev": "cd server && cargo run",
