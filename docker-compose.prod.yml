@@ -5,6 +5,8 @@ services:
       dockerfile: Dockerfile
     container_name: operon-backend
     restart: unless-stopped
+    ports:
+      - "8080:8080"
     environment:
       DATABASE_URL: ${DATABASE_URL}
       OPERON_API_BIND: 0.0.0.0:8080
@@ -29,9 +31,11 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        NEXT_PUBLIC_API_URL: https://bematterfull.fireclaw.in
+        NEXT_PUBLIC_API_URL: https://api.bematterfull.fireclaw.in
     container_name: operon-frontend
     restart: unless-stopped
+    ports:
+      - "3000:3000"
     environment:
       AUTH_SECRET: ${AUTH_SECRET}
       AUTH_URL: https://bematterfull.fireclaw.in
@@ -44,35 +48,12 @@ services:
       CLOUDINARY_CLOUD_NAME: ${CLOUDINARY_CLOUD_NAME}
       CLOUDINARY_API_KEY: ${CLOUDINARY_API_KEY}
       CLOUDINARY_API_SECRET: ${CLOUDINARY_API_SECRET}
-      NEXT_PUBLIC_API_URL: https://bematterfull.fireclaw.in
-      # Internal backend URL (container-to-container)
-      OPERON_BACKEND_URL: http://backend:8080
-    depends_on:
-      - backend
-    networks:
-      - operon-net
-
-  caddy:
-    image: caddy:2-alpine
-    container_name: operon-caddy
-    restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
-    depends_on:
-      - frontend
-      - backend
+      NEXT_PUBLIC_API_URL: https://api.bematterfull.fireclaw.in
     networks:
       - operon-net
 
 volumes:
   workspaces:
-  caddy_data:
-  caddy_config:
 
 networks:
   operon-net:
