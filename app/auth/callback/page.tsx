@@ -29,7 +29,7 @@ function AuthCallbackContent() {
       },
     };
     saveOperonSession(auth);
-    router.replace("/dashboard/coding");
+    router.replace("/dashboard/chat");
   }, [params, router]);
 
   return (

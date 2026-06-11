@@ -124,6 +124,17 @@ interface AttachedFile {
   uploading?: boolean;
   url?: string;
   error?: string;
+  fileId?: string;
+}
+
+interface ConversationFile {
+  _id: string;
+  original_filename: string;
+  content_type?: string;
+  size_bytes: number;
+  url: string;
+  storage_type: string;
+  created_at: string;
 }
 
 interface ProviderApiState {
@@ -281,6 +292,7 @@ function ChatPage() {
   } | null>(null);
   const [waConnecting, setWaConnecting] = useState(false);
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
+  const [conversationFiles, setConversationFiles] = useState<ConversationFile[]>([]);
   const [selectedModel, setSelectedModel] =
     useState<string>("openai/gpt-4o-mini");
   const [modelOptions, setModelOptions] = useState<PromptModelOption[]>([
@@ -562,6 +574,8 @@ function ChatPage() {
           }),
         );
       setChatMessages(loaded);
+      // Load conversation files
+      setConversationFiles(data.files || []);
       requestAnimationFrame(() => scrollToBottom(true));
     } catch {
       toast.error("Failed to load conversation");
@@ -585,6 +599,7 @@ function ChatPage() {
     router.push("/dashboard/chat");
     setConversationId(null);
     setChatMessages([]);
+    setConversationFiles([]);
     setActiveChannel("web");
     setInput("");
   }
@@ -610,6 +625,10 @@ function ChatPage() {
       setAttachedFiles((prev) => [...prev, entry]);
       const formData = new FormData();
       formData.append("file", file);
+      // Send conversation_id so backend can associate file with the conversation
+      if (conversationId) {
+        formData.append("conversation_id", conversationId);
+      }
       operonFetch("/uploads", { method: "POST", body: formData })
         .then(async (res) => {
           if (!res.ok) {
@@ -622,7 +641,7 @@ function ChatPage() {
           setAttachedFiles((prev) =>
             prev.map((f) =>
               f.file === file
-                ? { ...f, uploading: false, url: data.publicUrl || data.url }
+                ? { ...f, uploading: false, url: data.publicUrl || data.url, fileId: data.fileId }
                 : f,
             ),
           );
@@ -828,6 +847,14 @@ function ChatPage() {
         };
         await sendMessage(content, msgOpts);
         loadConversations();
+        // Reload conversation files to include newly uploaded files
+        if (activeConvId) {
+          const fileRes = await operonFetch(`/agent/conversations/${encodeURIComponent(activeConvId)}`);
+          if (fileRes.ok) {
+            const fileData = await fileRes.json();
+            setConversationFiles(fileData.files || []);
+          }
+        }
       } catch (err) {
         const message =
           err instanceof Error ? err.message : "Failed to connect";
@@ -1688,6 +1715,28 @@ function ChatPage() {
                 }}
               />
             </ChatErrorBoundary>
+
+            {/* Files shared in this conversation */}
+            {conversationFiles.length > 0 && (
+              <div className="mt-4 flex flex-wrap gap-2">
+                {conversationFiles.map((file) => (
+                  <a
+                    key={file._id}
+                    href={file.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    download={file.original_filename}
+                    className="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-1.5 text-xs text-foreground shadow-sm transition-colors hover:bg-accent hover:border-primary/30"
+                  >
+                    <FileTypeIcon filename={file.original_filename} className="size-4" />
+                    <span className="max-w-32 truncate">{file.original_filename}</span>
+                    <span className="text-muted-foreground">
+                      ({(file.size_bytes / 1024).toFixed(0)} KB)
+                    </span>
+                  </a>
+                ))}
+              </div>
+            )}
 
             <div
               ref={messagesEndRef}

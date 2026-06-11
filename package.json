@@ -10,7 +10,10 @@
     "rust:check": "cd server && cargo check",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "stop chrome" : "taskkill /f /im chrome.exe",
+    "stop" : "taskkill /f /im bun.exe",
+    "stop server" : "taskkill /f /im rust.exe"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.81",

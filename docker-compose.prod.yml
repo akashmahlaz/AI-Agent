@@ -1,22 +1,4 @@
 services:
-  postgres:
-    image: postgres:16-alpine
-    container_name: operon-postgres
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: operon
-      POSTGRES_USER: operon
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U operon -d operon"]
-      interval: 5s
-      timeout: 5s
-      retries: 12
-    networks:
-      - operon-net
-
   backend:
     build:
       context: ./server
@@ -24,7 +6,7 @@ services:
     container_name: operon-backend
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgresql://operon:${POSTGRES_PASSWORD}@postgres:5432/operon
+      DATABASE_URL: ${DATABASE_URL}
       OPERON_API_BIND: 0.0.0.0:8080
       OPERON_JWT_SECRET: ${JWT_SECRET}
       OPERON_WEB_ORIGIN: https://bematterfull.fireclaw.in
@@ -39,9 +21,6 @@ services:
       OPERON_WORKSPACE_ROOT: /app/workspaces
     volumes:
       - workspaces:/app/workspaces
-    depends_on:
-      postgres:
-        condition: service_healthy
     networks:
       - operon-net
 
@@ -91,7 +70,6 @@ services:
       - operon-net
 
 volumes:
-  postgres_data:
   workspaces:
   caddy_data:
   caddy_config:

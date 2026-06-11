@@ -1,37 +1,37 @@
-# ── Stage 1: Build Rust binary ────────────────────────────────────────────────
-FROM rust:latest AS builder
+# Stage 1: Build the Rust application
+FROM rust:1.75-alpine AS builder
+
+# Install build dependencies
+RUN apk add --no-cache musl-dev pkgconfig openssl-dev openssl-libs-static
+
 WORKDIR /app
 
-# Install build deps
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config libssl-dev libpq-dev \
-    && rm -rf /var/lib/apt/lists/*
+# Copy manifests first for better caching
+COPY Cargo.toml Cargo.lock* ./
+COPY src ./src
 
-# Cache dependencies by building a dummy project first
-COPY Cargo.toml Cargo.lock ./
-RUN mkdir src && echo "fn main() { println!(\"dummy\"); }" > src/main.rs
-RUN cargo build --release
-RUN rm -rf src target/release/deps/server* target/release/server*
-
-# Build actual source
-COPY . .
-RUN rm -f rust-toolchain.toml
+# Build the application
 RUN cargo build --release
 
-# ── Stage 2: Minimal runtime ──────────────────────────────────────────────────
-# Use the same Debian version as the builder to avoid glibc mismatch
-FROM rust:latest AS runner
+# Stage 2: Create minimal runtime image
+FROM alpine:3.19
+
+# Install runtime dependencies
+RUN apk add --no-cache ca-certificates libssl3
+
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates libssl3 libpq5 curl \
-    && rm -rf /var/lib/apt/lists/*
+# Copy the binary from builder
+COPY --from=builder /app/target/release/server /usr/local/bin/
 
-COPY --from=builder /app/target/release/server /app/server
-COPY --from=builder /app/migrations /app/migrations
+# Create data directories
+RUN mkdir -p /data/workspaces /app/local_uploads
 
-RUN mkdir -p /app/workspaces
-
+# Expose port
 EXPOSE 8080
 
-CMD ["/app/server"]
+# Set environment
+ENV RUST_LOG=info
+
+# Run the server
+CMD ["server"]

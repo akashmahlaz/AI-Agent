@@ -1,21 +1,93 @@
+version: '3.8'
+
 services:
+  # Frontend - Next.js
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8080
+      - NEXT_PUBLIC_APP_URL=http://localhost:3000
+    depends_on:
+      - backend
+    volumes:
+      - ./app:/app/app:ro
+      - ./components:/app/components:ro
+      - ./lib:/app/lib:ro
+      - ./public:/app/public:ro
+    networks:
+      - operon-network
+
+  # Backend - Rust/Axum
+  backend:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - DATABASE_URL=postgres://operon_user:operon_pass@postgres:5432/operon
+      - REDIS_URL=redis://redis:6379
+      - OPERON_JWT_SECRET=your-super-secret-jwt-key-change-in-production
+      - OPERON_WEB_ORIGIN=http://localhost:3000
+      - OPERON_API_BIND=0.0.0.0:8080
+      - OPERON_WORKSPACE_ROOT=/data/workspaces
+      - AWS_REGION=${AWS_REGION:-ap-south-1}
+      - AWS_BUCKET_NAME=${AWS_BUCKET_NAME:-mumbai-s3-all-work}
+      - AWS_ACCESS_KEY=${AWS_ACCESS_KEY}
+      - AWS_SECRET_KEY=${AWS_SECRET_KEY}
+      - RUST_LOG=info
+    volumes:
+      - ./server:/app:ro
+      - workspace-data:/data/workspaces
+      - uploads-data:/app/local_uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - operon-network
+
+  # PostgreSQL Database
   postgres:
     image: postgres:16-alpine
-    container_name: operon-postgres
-    restart: unless-stopped
     environment:
-      POSTGRES_DB: operon
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: operon_dev
+      - POSTGRES_USER=operon_user
+      - POSTGRES_PASSWORD=operon_pass
+      - POSTGRES_DB=operon
     ports:
       - "5432:5432"
     volumes:
-      - operon_postgres_data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql/data
+      - ./server/migrations:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d operon"]
+      test: ["CMD-SHELL", "pg_isready -U operon_user -d operon"]
       interval: 5s
       timeout: 5s
-      retries: 12
+      retries: 5
+    networks:
+      - operon-network
+
+  # Redis for sessions and caching
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - operon-network
 
 volumes:
-  operon_postgres_data:
+  postgres_data:
+  redis_data:
+  workspace-data:
+  uploads-data:
+
+networks:
+  operon-network:
+    driver: bridge

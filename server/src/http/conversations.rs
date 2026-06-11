@@ -25,6 +25,18 @@ use crate::{
 };
 
 #[derive(Serialize)]
+pub struct ConversationFile {
+    #[serde(rename = "_id")]
+    pub id: Uuid,
+    pub original_filename: String,
+    pub content_type: Option<String>,
+    pub size_bytes: i64,
+    pub url: String,
+    pub storage_type: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Serialize)]
 pub struct ConversationSummary {
     #[serde(rename = "_id")]
     pub id: Uuid,
@@ -58,6 +70,7 @@ pub struct ConversationDetail {
     #[serde(rename = "updatedAt")]
     pub updated_at: DateTime<Utc>,
     pub messages: Vec<MessageRow>,
+    pub files: Vec<ConversationFile>,
 }
 
 fn require_user(state: &AppState, headers: &HeaderMap) -> AppResult<Uuid> {
@@ -202,6 +215,30 @@ pub async fn get_conversation(
     if owner != user_id {
         return Err(AppError::Unauthorized);
     }
+
+    // Load files for this conversation
+    let file_rows = sqlx::query(
+        "select id, original_filename, content_type, size_bytes, url, storage_type, created_at \
+         from conversation_files where conversation_id = $1 order by created_at desc"
+    )
+    .bind(id)
+    .fetch_all(&state.db)
+    .await?;
+    let files = file_rows
+        .into_iter()
+        .map(|row| {
+            Ok::<_, AppError>(ConversationFile {
+                id: row.try_get("id")?,
+                original_filename: row.try_get("original_filename")?,
+                content_type: row.try_get("content_type").ok().flatten(),
+                size_bytes: row.try_get("size_bytes")?,
+                url: row.try_get("url")?,
+                storage_type: row.try_get("storage_type")?,
+                created_at: row.try_get("created_at")?,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
     let detail = ConversationDetail {
         id: conv.try_get("id")?,
         title: conv.try_get("title")?,
@@ -209,6 +246,7 @@ pub async fn get_conversation(
         created_at: conv.try_get("created_at")?,
         updated_at: conv.try_get("updated_at")?,
         messages: vec![],
+        files,
     };
 
     let msg_rows = sqlx::query(

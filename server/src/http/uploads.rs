@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use axum::{Json, extract::Multipart, extract::State};
+use axum::{Json, extract::Multipart, extract::State, http::HeaderMap};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -16,6 +16,12 @@ const MAX_FILE_BYTES: usize = 100 * 1024 * 1024;
 /// Local directory used when S3 credentials are not configured. Files are
 /// served back via `GET /local-uploads/:filename` (ServeDir in router).
 pub const LOCAL_UPLOADS_DIR: &str = "./local_uploads";
+
+/// Get user ID from JWT without requiring auth (for optional auth like file uploads)
+fn get_optional_user(state: &AppState, headers: &HeaderMap) -> Option<Uuid> {
+    let token = super::token_from_request(headers)?;
+    super::decode_claims_public(state, token).ok()
+}
 
 /// URL-encode every byte of an S3/local path segment that isn't an unreserved
 /// character per RFC 3986. Spaces, commas, parentheses, etc. become `%XX`
@@ -67,13 +73,17 @@ fn safe_extension(filename: &str) -> Option<String> {
 /// Both paths return the same JSON shape so the frontend is unaware of which
 /// backend was used.
 pub async fn create_upload(
+    headers: HeaderMap,
     State(state): State<AppState>,
     mut multipart: Multipart,
 ) -> AppResult<Json<serde_json::Value>> {
     tracing::info!("upload: receiving multipart request");
 
-    // --- extract file field --------------------------------------------------
+    let user_id = get_optional_user(&state, &headers);
+
+    // --- extract file field + conversation_id --------------------------------
     let mut file_data: Option<(String, String, Vec<u8>)> = None;
+    let mut conversation_id: Option<Uuid> = None;
     while let Some(field) = multipart
         .next_field()
         .await
@@ -84,7 +94,11 @@ pub async fn create_upload(
     {
         let field_name = field.name().unwrap_or("").to_string();
         tracing::debug!(field = %field_name, "upload: processing multipart field");
-        if field_name == "file" {
+        if field_name == "conversation_id" {
+            if let Ok(text) = field.text().await {
+                conversation_id = Uuid::parse_str(&text).ok();
+            }
+        } else if field_name == "file" {
             let filename = field.file_name().unwrap_or("unnamed").to_string();
             let content_type = field
                 .content_type()
@@ -144,7 +158,7 @@ pub async fn create_upload(
         && state.config.aws_secret_key.is_some();
 
     if has_s3 {
-        upload_to_s3(&state, &key, &original_filename, &content_type, bytes, size).await
+        upload_to_s3(&state, &key, &original_filename, &content_type, bytes, size, user_id, conversation_id).await
     } else {
         tracing::warn!(
             "upload: AWS credentials not configured \
@@ -152,7 +166,7 @@ pub async fn create_upload(
              Falling back to local disk storage at {LOCAL_UPLOADS_DIR}. \
              Files will NOT persist across server restarts in production."
         );
-        upload_to_local(&state, &key, &original_filename, &content_type, bytes, size).await
+        upload_to_local(&state, &key, &original_filename, &content_type, bytes, size, user_id, conversation_id).await
     }
 }
 
@@ -166,6 +180,8 @@ async fn upload_to_s3(
     content_type: &str,
     bytes: Vec<u8>,
     size: usize,
+    user_id: Option<Uuid>,
+    conversation_id: Option<Uuid>,
 ) -> AppResult<Json<serde_json::Value>> {
     let region = state.config.aws_region.as_deref().unwrap();
     let bucket = state.config.aws_bucket_name.as_deref().unwrap();
@@ -198,7 +214,7 @@ async fn upload_to_s3(
         .body(aws_sdk_s3::primitives::ByteStream::from(bytes))
         .content_type(content_type)
         .content_disposition(format!(
-            "inline; filename=\"{}\"",
+            "attachment; filename=\"{}\"",
             original_filename.replace('"', "'")
         ))
         .send()
@@ -215,6 +231,34 @@ async fn upload_to_s3(
         .join("/");
     let public_url = format!("https://{bucket}.s3.{region}.amazonaws.com/{encoded_key}");
 
+    // Store file metadata if user is authenticated
+    let file_id = if let (Some(uid), Some(cid)) = (user_id, conversation_id) {
+        let id = Uuid::now_v7();
+        if sqlx::query(
+            r#"insert into conversation_files
+               (id, conversation_id, user_id, original_filename, storage_key, storage_type, content_type, size_bytes, url)
+               values ($1, $2, $3, $4, $5, 's3', $6, $7, $8)"#
+        )
+        .bind(id)
+        .bind(cid)
+        .bind(uid)
+        .bind(original_filename)
+        .bind(&s3_key)
+        .bind(content_type)
+        .bind(size as i64)
+        .bind(&public_url)
+        .execute(&state.db)
+        .await
+        .is_ok()
+        {
+            Some(id)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     tracing::info!(public_url = %public_url, "upload: S3 upload complete");
     Ok(Json(json!({
         "url": public_url,
@@ -223,7 +267,8 @@ async fn upload_to_s3(
         "filename": original_filename,
         "contentType": content_type,
         "size": size,
-        "storage": "s3"
+        "storage": "s3",
+        "fileId": file_id
     })))
 }
 
@@ -237,6 +282,8 @@ async fn upload_to_local(
     content_type: &str,
     bytes: Vec<u8>,
     size: usize,
+    user_id: Option<Uuid>,
+    conversation_id: Option<Uuid>,
 ) -> AppResult<Json<serde_json::Value>> {
     let dir = PathBuf::from(LOCAL_UPLOADS_DIR);
     tokio::fs::create_dir_all(&dir).await.map_err(|e| {
@@ -255,6 +302,34 @@ async fn upload_to_local(
     let bind = format!("http://{}", state.config.bind_addr);
     let public_url = format!("{bind}/local-uploads/{key}");
 
+    // Store file metadata if user is authenticated
+    let file_id = if let (Some(uid), Some(cid)) = (user_id, conversation_id) {
+        let id = Uuid::now_v7();
+        if sqlx::query(
+            r#"insert into conversation_files
+               (id, conversation_id, user_id, original_filename, storage_key, storage_type, content_type, size_bytes, url)
+               values ($1, $2, $3, $4, $5, 'local', $6, $7, $8)"#
+        )
+        .bind(id)
+        .bind(cid)
+        .bind(uid)
+        .bind(original_filename)
+        .bind(key)
+        .bind(content_type)
+        .bind(size as i64)
+        .bind(&public_url)
+        .execute(&state.db)
+        .await
+        .is_ok()
+        {
+            Some(id)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     tracing::info!(
         path = %file_path.display(),
         public_url = %public_url,
@@ -268,6 +343,7 @@ async fn upload_to_local(
         "filename": original_filename,
         "contentType": content_type,
         "size": size,
-        "storage": "local"
+        "storage": "local",
+        "fileId": file_id
     })))
 }
