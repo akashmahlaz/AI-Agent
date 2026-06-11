@@ -87,41 +87,43 @@ jobs:
 
       - name: Deploy to EC2
         run: |
-          ssh -o StrictHostKeyChecking=no ${{ env.SERVER_USER }}@${{ env.SERVER_IP }} << 'EOF'
+          FRONTEND_IMAGE='${{ steps.meta.outputs.frontend_image }}'
+          BACKEND_IMAGE='${{ steps.meta.outputs.backend_image }}'
+          ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 ${{ env.SERVER_USER }}@${{ env.SERVER_IP }} "
             set -e
             cd /opt/operon
 
-            # Pull latest code
-            sudo git pull origin main
+            # Login to ECR
+            aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 727646466929.dkr.ecr.us-east-1.amazonaws.com
 
-            # Update .env with latest secrets if needed
-            sudo bash -c 'cat > /opt/operon/.env << '\''ENVS'\''
-POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-operon-prod-password-2026}
+            # Pull new images
+            docker pull $FRONTEND_IMAGE
+            docker pull $BACKEND_IMAGE
+
+            # Tag images
+            docker tag $FRONTEND_IMAGE operon-frontend:latest
+            docker tag $BACKEND_IMAGE operon-backend:latest
+
+            # Update .env file
+            cat > /tmp/operon_env.txt << 'ENVFILE'
+POSTGRES_PASSWORD=operon_secret_2026
 JWT_SECRET=${{ secrets.OPERON_JWT_SECRET }}
 AUTH_SECRET=${{ secrets.AUTH_SECRET }}
 OPERON_WEB_ORIGIN=https://bematterfull.fireclaw.in
 OPERON_API_BIND=0.0.0.0:8080
 OPERON_OAUTH_REDIRECT_BASE=https://bematterfull.fireclaw.in
-OPERON_NEXT_BASE_URL=https://bematterfull.fireclaw.in
 OPERON_COOKIE_SECURE=true
+OPERON_NEXT_BASE_URL=https://bematterfull.fireclaw.in
 NEXT_PUBLIC_API_URL=${{ secrets.NEXT_PUBLIC_API_URL }}
 DATABASE_URL=${{ secrets.DATABASE_URL }}
 AWS_REGION=${{ env.AWS_REGION }}
 AWS_BUCKET_NAME=${{ secrets.AWS_BUCKET_NAME }}
 AWS_ACCESS_KEY=${{ secrets.AWS_ACCESS_KEY }}
 AWS_SECRET_KEY=${{ secrets.AWS_SECRET_KEY }}
-ENVS'
-
-            # Pull new images from ECR
-            aws ecr get-login-password --region us-east-1 | sudo docker login --username AWS --password-stdin 727646466929.dkr.ecr.us-east-1.amazonaws.com
-            sudo docker pull ${{ steps.meta.outputs.frontend_image }}
-            sudo docker pull ${{ steps.meta.outputs.backend_image }}
-
-            # Tag images for local use
-            sudo docker tag ${{ steps.meta.outputs.frontend_image }} operon-frontend:latest
-            sudo docker tag ${{ steps.meta.outputs.backend_image }} operon-backend:latest
+ENVFILE
+ sudo mv /tmp/operon_env.txt /opt/operon/.env
 
             # Restart containers
             cd /opt/operon && sudo docker compose -f docker-compose.prod.yml down
             cd /opt/operon && sudo docker compose -f docker-compose.prod.yml up -d --build
-          EOF
+          "
