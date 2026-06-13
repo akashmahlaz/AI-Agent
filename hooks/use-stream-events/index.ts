@@ -980,6 +980,22 @@ export function useStreamEvents({
               "[stream] Stream ended without message-end event — forcing completion",
             );
           }
+          // Resolve any tool calls still stuck in an active/loading state so
+          // their spinners don't persist after the run ends.
+          for (const part of assistantMessageRef.current.orderedParts) {
+            if (part.type.startsWith("tool-call")) {
+              const tp = part as ToolCallEvent;
+              if (
+                tp.state === "calling" ||
+                tp.state === "input-streaming" ||
+                tp.state === "input-available" ||
+                tp.state === "executing"
+              ) {
+                tp.state = "output-error";
+                tp.errorText = "Run interrupted";
+              }
+            }
+          }
           assistantMessageRef.current.isComplete = true;
           assistantMessageRef.current.isStreaming = false;
           setMessages((prev) =>
@@ -1000,6 +1016,21 @@ export function useStreamEvents({
   const stop = useCallback(() => {
     abortRef.current?.abort();
     if (assistantMessageRef.current) {
+      // Resolve any tool calls still in an active/loading state
+      for (const part of assistantMessageRef.current.orderedParts) {
+        if (part.type.startsWith("tool-call")) {
+          const tp = part as ToolCallEvent;
+          if (
+            tp.state === "calling" ||
+            tp.state === "input-streaming" ||
+            tp.state === "input-available" ||
+            tp.state === "executing"
+          ) {
+            tp.state = "output-error";
+            tp.errorText = "Stopped";
+          }
+        }
+      }
       assistantMessageRef.current.isComplete = true;
       assistantMessageRef.current.isStreaming = false;
       setMessages((prev) => {

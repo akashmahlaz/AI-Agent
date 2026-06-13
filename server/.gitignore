@@ -5,3 +5,5 @@ target/
 .sqlx/
 .git/
 *.log
+workspaces
+
