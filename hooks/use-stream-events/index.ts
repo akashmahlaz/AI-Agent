@@ -371,16 +371,45 @@ export function useStreamEvents({
   // ---------------------------------------------------------------------------
   function handleEvent(ev: SSEEvent) {
     _debugLogThroughput(ev.type ?? "unknown");
-    // Deep logging: log every SSE event in development for debugging
-    if (process.env.NODE_ENV === "development") {
-      console.debug(`[stream] ${ev.type}`, {
-        toolCallId: ev.data.toolCallId,
-        toolName: ev.data.toolName,
-        text: ev.data.text?.slice(0, 80),
-        status: ev.data.status,
-        errorText: ev.data.errorText,
-      });
-    }
+    // Deep logging: log every SSE event so the user can see exactly what the
+    // model is doing with their file (tool dispatch, response text, errors).
+    // Logged unconditionally (not gated on NODE_ENV) so production issues are
+    // traceable from the browser console.
+    const summary = (() => {
+      switch (ev.type) {
+        case "tool-call-start":
+          return `tool=${ev.data.toolName ?? "?"} id=${ev.data.toolCallId ?? "?"} invocation="${ev.data.invocationMessage ?? ""}"`;
+        case "tool-call-update":
+          return `tool=${ev.data.toolName ?? "?"} id=${ev.data.toolCallId ?? "?"} invocation="${ev.data.invocationMessage ?? ""}"`;
+        case "tool-call-input-available":
+          return `tool=${ev.data.toolName ?? "?"} id=${ev.data.toolCallId ?? "?"} args=${JSON.stringify(ev.data.args ?? {}).slice(0, 200)}`;
+        case "tool-call-output-available":
+          return `tool=${ev.data.toolName ?? "?"} id=${ev.data.toolCallId ?? "?"} result=${JSON.stringify(ev.data.result ?? {}).slice(0, 200)}`;
+        case "tool-call-output-error":
+          return `tool=${ev.data.toolName ?? "?"} id=${ev.data.toolCallId ?? "?"} error="${ev.data.errorText ?? ""}"`;
+        case "text-delta":
+          return `+${ev.data.text?.length ?? 0}chars "${(ev.data.text ?? "").slice(0, 80)}"`;
+        case "reasoning-delta":
+          return `reasoning +${ev.data.text?.length ?? 0}chars`;
+        case "stream-error":
+          return `error="${ev.data.message ?? "?"}" provider=${ev.data.provider ?? "?"} requestId=${ev.data.requestId ?? "?"}`;
+        case "warning":
+          return `warning="${ev.data.text ?? ""}"`;
+        case "usage":
+          return `prompt=${ev.data.promptTokens ?? 0} completion=${ev.data.completionTokens ?? 0} total=${ev.data.totalTokens ?? 0}`;
+        case "provider-request-id":
+          return `provider=${ev.data.provider ?? ""} model=${ev.data.model ?? ""} requestId=${ev.data.requestId ?? ""}`;
+        case "message-end":
+          return `message-end (assistant finished)`;
+        case "run-completed":
+        case "run-failed":
+        case "run-cancelled":
+          return `${ev.type}`;
+        default:
+          return "";
+      }
+    })();
+    console.log(`[stream] ${ev.type}${summary ? " | " + summary : ""}`);
     switch (ev.type) {
       case "reasoning-start":
         reasoningTextRef.current = "";
@@ -703,6 +732,31 @@ export function useStreamEvents({
           setMessages((prev) => {
             return upsertAssistantMessage(prev, assistantMessageRef.current!);
           });
+          // ── Deep log: AI response summary ──────────────────────────────────────
+          // Lets the user confirm what the model did with their file: tool
+          // calls made, text length, final status.
+          const parts = assistantMessageRef.current.orderedParts;
+          const textChars = parts
+            .filter((p) => p.type === "text-delta")
+            .reduce((sum, p) => sum + (p as TextDeltaEvent).text.length, 0);
+          const toolCalls = parts.filter((p) => p.type.startsWith("tool-call"))
+            .map((p) => ({
+              name: (p as ToolCallEvent).toolName,
+              state: (p as ToolCallEvent).state,
+            }));
+          const finalText = parts
+            .filter((p) => p.type === "text-delta")
+            .map((p) => (p as TextDeltaEvent).text)
+            .join("");
+          console.log("[frontend] ai_response_received", {
+            textChars,
+            finalTextPreview:
+              finalText.length > 600
+                ? `${finalText.slice(0, 600)}…(total ${finalText.length} chars)`
+                : finalText,
+            toolCallCount: toolCalls.length,
+            toolCalls,
+          });
           onFinished?.(assistantMessageRef.current);
         }
         // Flip top-level status immediately so the input re-enables even if
@@ -793,7 +847,49 @@ export function useStreamEvents({
         appendTextDelta(chunk);
       }, 3);
 
-      // Build the user message — either the steer message (if steering) or the new message
+      // Build the user message — either the steer message (if steering) or the new message.
+      // Attachments are forwarded so the user bubble can render ChatGPT-style
+      // preview chips above the text. The same `opts.attachments` payload is
+      // also sent to the agent runner, which uses the active provider adapter
+      // to translate them into native content blocks (image_url, input_file, ...).
+      const attachments = opts?.attachments?.map((a) => ({
+        url: a.url,
+        mimeType: a.mimeType,
+        name: a.name,
+      }));
+
+      // ── Deep log: what the user is sending ───────────────────────────────────
+      // Mirrors the backend's `agent_run_start` log so the file journey
+      // (upload → request → response → tool calls) is end-to-end traceable
+      // from the browser console.
+      const promptPreview =
+        text.length > 600
+          ? `${text.slice(0, 600)}…(total ${text.length} chars)`
+          : text;
+      console.log("[frontend] send_message_start", {
+        isSteer,
+        modelSpec: opts?.modelSpec ?? null,
+        reasoningLevel: opts?.reasoningLevel ?? null,
+        channel: opts?.channel ?? null,
+        conversationId: opts?.conversationId ?? conversationId ?? null,
+        promptPreview,
+        attachmentCount: attachments?.length ?? 0,
+        attachments: attachments?.map((a) => ({
+          name: a.name,
+          mimeType: a.mimeType,
+          url: a.url,
+        })),
+      });
+      if (attachments && attachments.length > 0) {
+        for (const att of attachments) {
+          console.log("[frontend] send_attachment", {
+            name: att.name,
+            mimeType: att.mimeType,
+            url: att.url,
+          });
+        }
+      }
+
       const userMsg: StreamingMessage = {
         id: nextId(),
         role: "user",
@@ -802,6 +898,7 @@ export function useStreamEvents({
         ],
         isComplete: true,
         isStreaming: false,
+        attachments: attachments && attachments.length > 0 ? attachments : undefined,
       };
 
       assistantMessageRef.current = {
@@ -911,6 +1008,10 @@ export function useStreamEvents({
             });
 
         if (!res.ok) {
+          console.error("[frontend] send_message_http_error", {
+            status: res.status,
+            statusText: res.statusText,
+          });
           throw new Error(`HTTP ${res.status}: ${res.statusText}`);
         }
 
@@ -924,6 +1025,11 @@ export function useStreamEvents({
           /* ignore observer errors */
         }
 
+        console.log("[frontend] stream_starting", {
+          xRunId: res.headers.get("X-Run-Id") ?? null,
+          xConversationId: res.headers.get("X-Conversation-Id") ?? null,
+          contentType: res.headers.get("Content-Type") ?? null,
+        });
         setStatus("streaming");
 
         const reader = res.body.getReader();
@@ -955,15 +1061,25 @@ export function useStreamEvents({
         }
       } catch (err) {
         if ((err as Error).name === "AbortError") {
+          console.log("[frontend] send_message_aborted");
           // User cancelled — not an error
         } else {
           const e = err instanceof Error ? err : new Error(String(err));
+          console.error("[frontend] send_message_error", {
+            message: e.message,
+            stack: e.stack?.split("\n").slice(0, 5).join("\n"),
+          });
           setError(e);
           setStatus("error");
         }
       } finally {
         // Ignore cleanup from a stale aborted stream after a steer/new request.
         if (requestSeq !== requestSeqRef.current) return;
+        console.log("[frontend] send_message_finalized", {
+          isComplete: assistantMessageRef.current?.isComplete ?? false,
+          partCount: assistantMessageRef.current?.orderedParts.length ?? 0,
+          status: "idle",
+        });
         // Flush and destroy typewriter buffer
         typewriterRef.current?.flush();
         typewriterRef.current?.destroy();

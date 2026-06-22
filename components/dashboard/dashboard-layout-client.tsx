@@ -1,6 +1,6 @@
 ﻿"use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { LogOut, Settings, ChevronRight } from "lucide-react";
@@ -33,7 +33,10 @@ interface DashboardLayoutClientProps {
   children: React.ReactNode;
 }
 
-export function DashboardLayoutClient({ user: initialUser, children }: DashboardLayoutClientProps) {
+export function DashboardLayoutClient({
+  user: initialUser,
+  children,
+}: DashboardLayoutClientProps) {
   const pathname = usePathname();
   const router = useRouter();
   const session = useOperonSession();
@@ -41,10 +44,28 @@ export function DashboardLayoutClient({ user: initialUser, children }: Dashboard
   const [expanded, setExpanded] = useState(false);
   const SettingsIcon = settingsDashboardSection.icon;
 
+  // Auth guard: redirect to login if not authenticated
+  useEffect(() => {
+    if (!session.loading && !user) {
+      const next = encodeURIComponent(pathname);
+      router.replace(`/login?next=${next}`);
+    }
+  }, [session.loading, user, pathname, router]);
+
+  // Show nothing while checking auth (prevents flash of unprotected content)
+  if (session.loading || !user) {
+    return (
+      <div className="flex h-dvh items-center justify-center bg-background">
+        <div className="size-6 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+      </div>
+    );
+  }
+
   const isSettings = pathname.startsWith("/dashboard/settings");
   const activeSection = isSettings
     ? "settings"
-    : allDashboardSections.find((s) => pathname.startsWith(s.href))?.id ?? "chat";
+    : (allDashboardSections.find((s) => pathname.startsWith(s.href))?.id ??
+      "chat");
 
   const userInitial = user?.name?.charAt(0)?.toUpperCase() || "?";
 
@@ -90,7 +111,9 @@ export function DashboardLayoutClient({ user: initialUser, children }: Dashboard
                       href={section.href}
                       className={cn(
                         "group relative flex items-center gap-2.5 rounded-xl transition-all duration-150",
-                        expanded ? "px-3 py-2.5" : "size-10 justify-center mx-auto",
+                        expanded
+                          ? "px-3 py-2.5"
+                          : "size-10 justify-center mx-auto",
                         isActive
                           ? `${section.bg} ${section.text} shadow-xs`
                           : "text-muted-foreground hover:bg-accent hover:text-foreground",
@@ -98,7 +121,12 @@ export function DashboardLayoutClient({ user: initialUser, children }: Dashboard
                     >
                       <Icon className="size-4.5 shrink-0" />
                       {expanded && (
-                        <span className={cn("text-[13px]", isActive ? "font-semibold" : "font-medium")}>
+                        <span
+                          className={cn(
+                            "text-[13px]",
+                            isActive ? "font-semibold" : "font-medium",
+                          )}
+                        >
                           {section.label}
                         </span>
                       )}
@@ -108,7 +136,11 @@ export function DashboardLayoutClient({ user: initialUser, children }: Dashboard
                     </Link>
                   </TooltipTrigger>
                   {!expanded && (
-                    <TooltipContent side="right" sideOffset={10} className="font-medium">
+                    <TooltipContent
+                      side="right"
+                      sideOffset={10}
+                      className="font-medium"
+                    >
                       {section.label}
                     </TooltipContent>
                   )}
@@ -134,14 +166,23 @@ export function DashboardLayoutClient({ user: initialUser, children }: Dashboard
                 >
                   <SettingsIcon className="size-4.5" />
                   {expanded && (
-                    <span className={cn("text-[13px]", isSettings ? "font-semibold" : "font-medium")}>
+                    <span
+                      className={cn(
+                        "text-[13px]",
+                        isSettings ? "font-semibold" : "font-medium",
+                      )}
+                    >
                       Settings
                     </span>
                   )}
                 </Link>
               </TooltipTrigger>
               {!expanded && (
-                <TooltipContent side="right" sideOffset={10} className="font-medium">
+                <TooltipContent
+                  side="right"
+                  sideOffset={10}
+                  className="font-medium"
+                >
                   Settings
                 </TooltipContent>
               )}
@@ -156,23 +197,38 @@ export function DashboardLayoutClient({ user: initialUser, children }: Dashboard
                   )}
                 >
                   <Avatar className="size-7 shrink-0 ring-2 ring-border">
-                    {user?.image ? <AvatarImage src={user.image} alt={user.name || ""} /> : null}
+                    {user?.image ? (
+                      <AvatarImage src={user.image} alt={user.name || ""} />
+                    ) : null}
                     <AvatarFallback className="bg-foreground text-background text-[11px] font-semibold">
                       {userInitial}
                     </AvatarFallback>
                   </Avatar>
                   {expanded && (
                     <div className="min-w-0 flex-1 text-left">
-                      <p className="truncate text-[12px] font-medium text-foreground">{user?.name || "User"}</p>
-                      <p className="truncate text-[10px] text-muted-foreground">{user?.email}</p>
+                      <p className="truncate text-[12px] font-medium text-foreground">
+                        {user?.name || "User"}
+                      </p>
+                      <p className="truncate text-[10px] text-muted-foreground">
+                        {user?.email}
+                      </p>
                     </div>
                   )}
                 </button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent side="right" align="end" sideOffset={10} className="w-52 rounded-xl">
+              <DropdownMenuContent
+                side="right"
+                align="end"
+                sideOffset={10}
+                className="w-52 rounded-xl"
+              >
                 <div className="px-3 py-2.5">
-                  <p className="text-sm font-semibold text-foreground truncate">{user?.name || "User"}</p>
-                  <p className="text-xs text-muted-foreground truncate">{user?.email}</p>
+                  <p className="text-sm font-semibold text-foreground truncate">
+                    {user?.name || "User"}
+                  </p>
+                  <p className="text-xs text-muted-foreground truncate">
+                    {user?.email}
+                  </p>
                 </div>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem asChild>
@@ -183,7 +239,10 @@ export function DashboardLayoutClient({ user: initialUser, children }: Dashboard
                 <DropdownMenuSeparator />
                 <DropdownMenuItem
                   className="gap-2 text-destructive focus:text-destructive"
-                  onClick={() => { clearOperonSession(); router.push("/"); }}
+                  onClick={() => {
+                    clearOperonSession();
+                    router.push("/");
+                  }}
                 >
                   <LogOut className="size-3.5" /> Sign out
                 </DropdownMenuItem>
@@ -193,9 +252,7 @@ export function DashboardLayoutClient({ user: initialUser, children }: Dashboard
         </nav>
 
         {/* Main content */}
-        <div className="flex flex-1 overflow-hidden">
-          {children}
-        </div>
+        <div className="flex flex-1 overflow-hidden">{children}</div>
       </div>
     </TooltipProvider>
   );

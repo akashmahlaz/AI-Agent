@@ -605,6 +605,7 @@ function ChatPage() {
   }
 
   function handleFileClick() {
+    console.log("[frontend] file_picker_open");
     fileInputRef.current?.click();
   }
 
@@ -613,8 +614,22 @@ function ChatPage() {
   // a placeholder chip, then POSTs to /uploads in the background.
   function uploadFiles(files: File[]) {
     if (!files.length) return;
+    console.log("[frontend] upload_start", {
+      fileCount: files.length,
+      conversationId,
+      files: files.map((f) => ({
+        name: f.name,
+        mimeType: f.type,
+        sizeBytes: f.size,
+      })),
+    });
     for (const file of files) {
       if (file.size > 100 * 1024 * 1024) {
+        console.warn("[frontend] upload_rejected_too_large", {
+          name: file.name,
+          sizeBytes: file.size,
+          limitMB: 100,
+        });
         toast.error(`${file.name} is too large (max 100 MB)`);
         continue;
       }
@@ -638,6 +653,14 @@ function ChatPage() {
             throw new Error(err.error || "Upload failed");
           }
           const data = await res.json();
+          console.log("[frontend] upload_complete", {
+            name: file.name,
+            mimeType: file.type,
+            sizeBytes: file.size,
+            url: data.publicUrl || data.url,
+            storage: data.storage,
+            fileId: data.fileId,
+          });
           setAttachedFiles((prev) =>
             prev.map((f) =>
               f.file === file
@@ -647,6 +670,12 @@ function ChatPage() {
           );
         })
         .catch((err) => {
+          console.error("[frontend] upload_failed", {
+            name: file.name,
+            mimeType: file.type,
+            sizeBytes: file.size,
+            error: err.message,
+          });
           setAttachedFiles((prev) =>
             prev.map((f) =>
               f.file === file
@@ -660,6 +689,9 @@ function ChatPage() {
   }
 
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    console.log("[frontend] file_picker_selection", {
+      count: e.target.files?.length ?? 0,
+    });
     uploadFiles(Array.from(e.target.files || []));
     e.target.value = "";
   }
@@ -671,10 +703,18 @@ function ChatPage() {
     const files = Array.from(e.clipboardData.files);
     if (files.length === 0) return;
     e.preventDefault();
+    console.log("[frontend] file_paste", {
+      count: files.length,
+      files: files.map((f) => ({ name: f.name, mimeType: f.type, sizeBytes: f.size })),
+    });
     uploadFiles(files);
   }
 
   function removeAttachedFile(file: File) {
+    console.log("[frontend] file_remove", {
+      name: file.name,
+      mimeType: file.type,
+    });
     setAttachedFiles((prev) => {
       const entry = prev.find((f) => f.file === file);
       if (entry?.preview) URL.revokeObjectURL(entry.preview);
@@ -701,7 +741,9 @@ function ChatPage() {
     e.preventDefault();
     e.stopPropagation();
     setDragOver(false);
-    uploadFiles(Array.from(e.dataTransfer.files));
+    const files = Array.from(e.dataTransfer.files);
+    console.log("[frontend] file_drop", { count: files.length });
+    uploadFiles(files);
   }
 
   async function startWhatsAppConnect() {
@@ -777,37 +819,39 @@ function ChatPage() {
       const uploadedFiles = attachedFiles.filter((f) => f.url);
       // Build structured attachments for vision model support (forwarded to
       // the runner so it can shape them into provider-native image parts).
+      // The same data is also rendered as ChatGPT-style preview chips in the
+      // user bubble by the FilePart component — no more bare markdown links.
       const attachments = uploadedFiles.map((f) => ({
         url: f.url!,
         mimeType: f.file.type || "application/octet-stream",
         name: f.file.name,
       }));
-      // Also surface attachments in the prompt itself: images as inline
-      // markdown so the user bubble shows a preview AND vision-capable models
-      // can fetch the URL; non-images as labelled links for context.
-      const imageFiles = uploadedFiles.filter((f) =>
-        f.file.type.startsWith("image/"),
-      );
-      const nonImageFiles = uploadedFiles.filter(
-        (f) => !f.file.type.startsWith("image/"),
-      );
-      const fileSections: string[] = [];
-      if (imageFiles.length > 0) {
-        fileSections.push(
-          imageFiles.map((f) => `![${f.file.name}](${f.url})`).join("\n"),
-        );
-      }
-      if (nonImageFiles.length > 0) {
-        fileSections.push(
-          nonImageFiles
-            .map((f) => `[File: ${f.file.name}](${f.url})`)
-            .join("\n"),
-        );
-      }
-      if (fileSections.length > 0) {
-        const filePart = fileSections.join("\n\n");
-        content = content ? `${content}\n\n${filePart}` : filePart;
-      }
+
+      // Deep log: complete picture of what's about to be sent. Pairs with
+      // the backend's `agent_run_start` log for end-to-end traceability.
+      console.log("[frontend] handle_send_pre", {
+        promptPreview:
+          content.length > 600
+            ? `${content.slice(0, 600)}…(total ${content.length} chars)`
+            : content,
+        promptLength: content.length,
+        attachmentCount: attachments.length,
+        attachments: attachments.map((a) => ({
+          name: a.name,
+          mimeType: a.mimeType,
+          url: a.url,
+        })),
+        modelSpec: selectedModel,
+        reasoningLevel,
+        channel: activeChannel,
+        conversationId: conversationId ?? null,
+        isSteer: status === "submitted" || status === "streaming",
+      });
+      // NOTE: the previous "Also surface attachments in the prompt itself"
+      // markdown trick (`[File: x](url)`) has been removed. The agent adapter
+      // now receives native content blocks directly (image_url / file /
+      // document), and the user bubble renders proper preview chips. Adding
+      // markdown links would duplicate the file info and confuse the model.
 
       setInput("");
       // Revoke blob URLs to prevent memory leak

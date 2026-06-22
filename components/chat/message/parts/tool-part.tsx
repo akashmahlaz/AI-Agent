@@ -310,6 +310,16 @@ export function ToolPart({ tool }: { tool: ToolCallPart }) {
   const error = tool.state === "error" || tool.state === "output-error";
   const isPending = isActiveToolState(tool.state);
 
+  // Deep log: track every tool-card render so users can see exactly what
+  // the model did with the file (read it, searched it, patched it, etc.).
+  console.log("[frontend] render_tool_part", {
+    toolName: tool.toolName,
+    state: tool.state,
+    hasResult: tool.result != null,
+    hasError: !!tool.errorText,
+    argsKeys: tool.args ? Object.keys(tool.args) : [],
+  });
+
   const fallbackLabel = describeTool(tool.toolName, tool.args);
   const invocationMessage = isRawToolMessage(
     tool.invocationMessage,
@@ -417,6 +427,55 @@ export function ToolPart({ tool }: { tool: ToolCallPart }) {
                 <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground/60">
                   Output
                 </div>
+                {/* Download button for create_file tool */}
+                {typeof tool.result === "object" &&
+                  tool.result !== null &&
+                  "download_url" in
+                    (tool.result as Record<string, unknown>) && (
+                    <a
+                      href={String(
+                        (tool.result as Record<string, unknown>).download_url,
+                      )}
+                      download={
+                        ((tool.result as Record<string, unknown>)
+                          .filename as string) ?? "download"
+                      }
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="mt-2 mb-2 inline-flex items-center gap-2 rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 text-sm font-medium text-primary transition-colors hover:bg-primary/10 hover:border-primary/50"
+                    >
+                      <svg
+                        className="size-4"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={2}
+                          d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+                        />
+                      </svg>
+                      Download{" "}
+                      {((tool.result as Record<string, unknown>)
+                        .filename as string) ?? "file"}
+                      {Boolean(
+                        (tool.result as Record<string, unknown>).size_bytes,
+                      ) && (
+                        <span className="text-xs text-muted-foreground">
+                          (
+                          {Math.round(
+                            Number(
+                              (tool.result as Record<string, unknown>)
+                                .size_bytes,
+                            ) / 1024,
+                          )}
+                          KB)
+                        </span>
+                      )}
+                    </a>
+                  )}
                 {typeof tool.result === "string" ? (
                   <pre className="mt-1 max-h-72 overflow-auto rounded-md border border-border/50 bg-muted/40 px-2.5 py-1.5 font-mono text-[11.5px] leading-relaxed text-muted-foreground">
                     {tool.result}

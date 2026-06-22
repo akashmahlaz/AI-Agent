@@ -15,6 +15,7 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { cn } from "@/lib/utils";
 import { describeTool } from "@/components/chat/message/parts/tool-part";
+import { FilePartList } from "@/components/chat/message/parts/file-part";
 import { CodeHighlight } from "@/components/chat/message/parts/code-highlight";
 import {
   DataTable,
@@ -48,6 +49,7 @@ import type {
   WarningEvent,
   UsageEvent,
   StreamErrorEvent,
+  MessageAttachment,
 } from "@/hooks/use-stream-events/types";
 import {
   AlertCircle,
@@ -1711,13 +1713,24 @@ const StreamingText = memo(function StreamingText({
 // ---------------------------------------------------------------------------
 // UserMessage - transcript-style prompt row.
 // ---------------------------------------------------------------------------
-function UserMessage({ text }: { text: string }) {
+function UserMessage({
+  text,
+  attachments,
+}: {
+  text: string;
+  attachments?: MessageAttachment[];
+}) {
   return (
-    <div className="group/user mt-4 mb-2 flex justify-end">
+    <div className="group/user mt-4 mb-2 flex flex-col items-end">
+      {attachments && attachments.length > 0 && (
+        <FilePartList attachments={attachments} />
+      )}
       <div className="max-w-[80%] rounded-2xl rounded-tr-sm bg-muted/70 px-4 py-2.5">
-        <p className="whitespace-pre-wrap wrap-break-word text-[15px] leading-[1.65] text-foreground">
-          {text}
-        </p>
+        {text && (
+          <p className="whitespace-pre-wrap wrap-break-word text-[15px] leading-[1.65] text-foreground">
+            {text}
+          </p>
+        )}
       </div>
     </div>
   );
@@ -1997,7 +2010,7 @@ const ChatMessageRow = memo(
         .filter((p) => p.type === "text-delta")
         .map((p) => (p as TextDeltaEvent).text)
         .join("");
-      return <UserMessage text={text} />;
+      return <UserMessage text={text} attachments={message.attachments} />;
     }
     return (
       <StreamingAssistantMessage

@@ -219,6 +219,17 @@ export interface StreamingMessage {
   orderedParts: StreamPart[];
   isComplete: boolean;
   isStreaming: boolean;
+  /** Files/images the user attached to this turn. Only set on user messages.
+   *  Rendered as ChatGPT-style preview cards in the user bubble; the same
+   *  urls are forwarded to the runner so the active provider adapter can
+   *  build native content blocks (input_image / input_file / document). */
+  attachments?: MessageAttachment[];
+}
+
+export interface MessageAttachment {
+  url: string;
+  name: string;
+  mimeType: string;
 }
 
 // For mapping from AI SDK UIMessage to our streaming format
