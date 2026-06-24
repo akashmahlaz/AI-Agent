@@ -11,7 +11,6 @@ import {
   Square,
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -133,15 +132,15 @@ export default function AI_Input_Search({
           label: compactModelLabel(selectedModel),
         } satisfies PromptModelOption));
 
-  useEffect(() => {
-    adjustHeight(value.length === 0);
-  }, [adjustHeight, value]);
-
   function submit() {
     const trimmed = value.trim();
     // While loading, Enter/Send acts as a steer message. Only hard-disable
     // for route/channel disabled states, not for generation-in-progress.
     if (!trimmed || disabled) return;
+    // Snap textarea back to minHeight immediately so the input bar doesn't
+    // shrink a frame later (which would cause a visible layout shift while
+    // the user's message bubble is being inserted above).
+    adjustHeight(true);
     onSubmit(trimmed);
   }
 

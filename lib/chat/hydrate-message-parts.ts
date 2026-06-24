@@ -1,4 +1,5 @@
 import type { StreamPart, ToolCallEvent } from "@/hooks/use-stream-events/types";
+import type { MessageAttachment } from "@/hooks/use-stream-events/types";
 
 function partId(messageId: string, index: number) {
   return `${messageId}-part-${index}`;
@@ -150,6 +151,11 @@ export function hydrateMessageParts(
         });
         break;
 
+      // file-attachment parts are metadata-only — they're extracted
+      // separately to populate message.attachments for the file chip UI.
+      case "file-attachment":
+        break;
+
       default:
         break;
     }
@@ -161,4 +167,31 @@ export function hydrateMessageParts(
   }
 
   return hydrated;
+}
+
+/**
+ * Extract file-attachment metadata from persisted parts.
+ * Returns undefined if no attachments are found (saves allocation).
+ */
+export function extractAttachmentsFromParts(
+  rawParts: unknown,
+): MessageAttachment[] | undefined {
+  if (!Array.isArray(rawParts)) return undefined;
+  const attachments: MessageAttachment[] = [];
+  for (const raw of rawParts) {
+    if (
+      typeof raw === "object" &&
+      raw !== null &&
+      (raw as Record<string, unknown>).type === "file-attachment"
+    ) {
+      const r = raw as Record<string, unknown>;
+      const url = typeof r.url === "string" ? r.url : "";
+      const name = typeof r.name === "string" ? r.name : "file";
+      const mimeType = typeof r.mimeType === "string" ? r.mimeType : "application/octet-stream";
+      if (url) {
+        attachments.push({ url, name, mimeType });
+      }
+    }
+  }
+  return attachments.length > 0 ? attachments : undefined;
 }

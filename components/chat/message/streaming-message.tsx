@@ -181,21 +181,42 @@ function MediaResult({
 }
 
 function extractDownloadResult(result: unknown):
-  | { url: string; name: string; sizeBytes?: number }
+  | { url: string; name: string; sizeBytes?: number; description?: string; mimeType?: string }
   | undefined {
   if (!result || typeof result !== "object") return undefined;
   const r = result as Record<string, unknown>;
   const url = r.download_url ?? r.downloadUrl ?? r.url;
   if (typeof url !== "string" || !url) return undefined;
-  const path = typeof r.path === "string" ? r.path : "download";
-  const name = path.split(/[\\/]/).filter(Boolean).pop() ?? "download";
+  // Prefer explicit filename, then URL basename, then path basename.
+  const rawName =
+    (typeof r.filename === "string" && r.filename) ||
+    (typeof r.path === "string" &&
+      r.path.split(/[\\/]/).filter(Boolean).pop()) ||
+    (typeof r.name === "string" && r.name) ||
+    (() => {
+      try {
+        const u = new URL(url);
+        const last = u.pathname.split("/").filter(Boolean).pop();
+        return last || "download";
+      } catch {
+        return "download";
+      }
+    })();
+  const name = rawName || "download";
   const sizeBytes =
     typeof r.size_bytes === "number"
       ? r.size_bytes
       : typeof r.sizeBytes === "number"
         ? r.sizeBytes
         : undefined;
-  return { url, name, sizeBytes };
+  const description = typeof r.description === "string" ? r.description : undefined;
+  const mimeType =
+    typeof r.mime_type === "string"
+      ? r.mime_type
+      : typeof r.mimeType === "string"
+        ? r.mimeType
+        : undefined;
+  return { url, name, sizeBytes, description, mimeType };
 }
 
 function formatBytes(bytes?: number) {
@@ -210,6 +231,13 @@ function formatBytes(bytes?: number) {
 function DownloadResult({ result }: { result: unknown }) {
   const file = extractDownloadResult(result);
   if (!file) return null;
+  const isImage = (file.mimeType ?? "").startsWith("image/");
+  const isPdf = file.mimeType === "application/pdf";
+  const FileIcon = isImage
+    ? ImageIcon
+    : isPdf
+      ? FileText
+      : Download;
 
   return (
     <a
@@ -217,15 +245,22 @@ function DownloadResult({ result }: { result: unknown }) {
       download={file.name}
       target="_blank"
       rel="noopener noreferrer"
-      className="inline-flex max-w-full items-center gap-2 rounded-lg border border-border bg-background px-3 py-2 text-xs text-foreground shadow-xs transition-colors hover:bg-muted"
+      className="group/dl flex max-w-md items-center gap-3 rounded-xl border border-primary/30 bg-primary/5 px-3.5 py-2.5 text-sm text-foreground shadow-sm transition-all hover:border-primary/60 hover:bg-primary/10"
     >
-      <Download className="size-3.5 shrink-0" />
-      <span className="truncate">{file.name}</span>
-      {file.sizeBytes != null && (
-        <span className="shrink-0 text-muted-foreground">
-          {formatBytes(file.sizeBytes)}
-        </span>
-      )}
+      <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/15 text-primary">
+        <FileIcon className="size-4" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <p className="truncate font-medium">{file.name}</p>
+        <p className="text-[11px] text-muted-foreground">
+          {file.description
+            ? file.description
+            : file.sizeBytes != null
+              ? `${formatBytes(file.sizeBytes)} · click to download`
+              : "click to download"}
+        </p>
+      </div>
+      <Download className="size-4 shrink-0 text-muted-foreground transition-transform group-hover/dl:translate-y-0.5" />
     </a>
   );
 }
@@ -1323,7 +1358,48 @@ function groupThinkingRuns(segments: RenderSegment[]): RenderGroup[] {
     groups.push({ kind: "thinking-run", segments: current });
   }
 
-  return groups;
+  return mergeTextAcrossThinkingRuns(groups);
+}
+
+/**
+ * Merge text segments that are separated only by thinking-runs into a single
+ * text segment at the position of the LAST text segment. This prevents the
+ * "text cutoff" effect where the model emits partial text, calls a tool, then
+ * resumes mid-word (e.g. "Let me se" [tool] "e what files are...").
+ *
+ * Layout becomes: [ThinkingRun] ... [ThinkingRun] [MergedText]
+ * instead of: [Text1] [ThinkingRun] [Text2] [ThinkingRun] [Text3]
+ */
+function mergeTextAcrossThinkingRuns(groups: RenderGroup[]): RenderGroup[] {
+  // Only merge if there's more than one text segment separated by thinking-runs.
+  // Keep non-thinking-run separators (sources, progress, etc.) as boundaries.
+  const result: RenderGroup[] = [];
+  let pendingTextEvents: TextDeltaEvent[] = [];
+
+  for (const group of groups) {
+    if (group.kind === "text") {
+      // Accumulate text events
+      pendingTextEvents.push(...group.events);
+    } else if (group.kind === "thinking-run") {
+      // Thinking-runs pass through; text accumulates across them
+      result.push(group);
+    } else {
+      // Any other segment type (sources, progress, etc.) acts as a boundary.
+      // Flush accumulated text before it.
+      if (pendingTextEvents.length > 0) {
+        result.push({ kind: "text", events: [...pendingTextEvents] });
+        pendingTextEvents = [];
+      }
+      result.push(group);
+    }
+  }
+
+  // Flush remaining text at the end
+  if (pendingTextEvents.length > 0) {
+    result.push({ kind: "text", events: pendingTextEvents });
+  }
+
+  return result;
 }
 
 function toolMessage(event: ToolCallEvent): string {

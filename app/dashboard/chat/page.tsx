@@ -70,7 +70,7 @@ import { StreamingChatMessageList } from "@/components/chat/message/streaming-me
 import { ChatErrorBoundary } from "@/components/chat/chat-error-boundary";
 import { useStreamEvents } from "@/hooks/use-stream-events";
 import type { StreamingMessage } from "@/hooks/use-stream-events/types";
-import { hydrateMessageParts } from "@/lib/chat/hydrate-message-parts";
+import { hydrateMessageParts, extractAttachmentsFromParts } from "@/lib/chat/hydrate-message-parts";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { operonFetch } from "@/lib/operon-api";
@@ -307,6 +307,11 @@ function ChatPage() {
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Track the last observed scrollHeight so we only auto-scroll on growth,
+  // not on every parent re-render. Eliminates the visible "wobble" that
+  // happens when the message list re-anchors while a response is streaming.
+  const lastScrollHeightRef = useRef(0);
+  const isNearBottomRef = useRef(true);
 
   useEffect(() => {
     convIdRef.current = conversationId;
@@ -395,10 +400,8 @@ function ChatPage() {
   const scrollToBottom = useCallback((instant = false) => {
     const el = messagesContainerRef.current;
     if (!el) return;
-    el.scrollTo({
-      top: el.scrollHeight,
-      behavior: instant ? "instant" : "smooth",
-    });
+    el.scrollTop = el.scrollHeight;
+    lastScrollHeightRef.current = el.scrollHeight;
   }, []);
 
   const checkIfNearBottom = useCallback(() => {
@@ -412,6 +415,7 @@ function ChatPage() {
     if (!el) return;
     const handler = () => {
       const near = checkIfNearBottom();
+      isNearBottomRef.current = near;
       setIsNearBottom(near);
       setShowScrollBtn(!near);
     };
@@ -419,14 +423,40 @@ function ChatPage() {
     return () => el.removeEventListener("scroll", handler);
   }, [checkIfNearBottom]);
 
-  const scrollThrottleRef = useRef(0);
+  // Auto-scroll: while the AI is streaming AND the user is pinned to the
+  // bottom, run a rAF loop that keeps the view anchored. This is the same
+  // approach ChatGPT / Claude use — it never misses content growth because
+  // it polls `scrollHeight` every frame instead of relying on observers
+  // that don't fire for overflow containers.
   useEffect(() => {
-    if (!isNearBottom) return;
-    const now = Date.now();
-    if (now - scrollThrottleRef.current < 100) return;
-    scrollThrottleRef.current = now;
-    requestAnimationFrame(() => scrollToBottom(true));
-  }, [messages, isNearBottom, scrollToBottom]);
+    if (!isLoading) return;
+    let raf: number;
+    const tick = () => {
+      const el = messagesContainerRef.current;
+      if (el && isNearBottomRef.current) {
+        const newHeight = el.scrollHeight;
+        if (newHeight !== lastScrollHeightRef.current) {
+          lastScrollHeightRef.current = newHeight;
+          el.scrollTop = newHeight;
+        }
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [isLoading]);
+
+  // Also scroll when messages first load (conversation switch)
+  useEffect(() => {
+    const el = messagesContainerRef.current;
+    if (!el || messages.length === 0) return;
+    // Small delay to let DOM paint
+    requestAnimationFrame(() => {
+      el.scrollTop = el.scrollHeight;
+      lastScrollHeightRef.current = el.scrollHeight;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conversationId]);
 
   // Load conversations + channel status
   useEffect(() => {
@@ -571,6 +601,8 @@ function ChatPage() {
             ),
             isComplete: true,
             isStreaming: false,
+            // Restore file attachments from persisted file-attachment parts
+            attachments: m.role === "user" ? extractAttachmentsFromParts(m.parts) : undefined,
           }),
         );
       setChatMessages(loaded);
