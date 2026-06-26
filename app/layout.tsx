@@ -25,7 +25,7 @@ const jetBrainsMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Operon — AI Gateway",
+  title: "Bematterfull — AI Ad Operations Copilot",
   description:
     "AI gateway for multi-channel chat, agents, and workflow automation.",
 };

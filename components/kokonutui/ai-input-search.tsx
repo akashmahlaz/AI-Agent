@@ -1,13 +1,19 @@
 ﻿"use client";
 
-import { ProviderIcon as LobeProviderIcon } from "@lobehub/icons";
+import { DeepAI, ProviderIcon as LobeProviderIcon } from "@lobehub/icons";
 import {
   ArrowUp,
   Bot,
+  Brain,
   BrainCircuit,
+  BrainCog,
   Check,
   ChevronDown,
+  FireExtinguisher,
+  MousePointerClick,
   Paperclip,
+  Power,
+  PowerCircle,
   Square,
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
@@ -282,7 +288,7 @@ export default function AI_Input_Search({
                           : "text-foreground/60 hover:text-foreground",
                       )}
                     >
-                      <BrainCircuit className="size-3.5" />
+                      <MousePointerClick className="size-4.5" />
                       <span className="hidden sm:inline">
                         {reasoningLabels[reasoningLevel]}
                       </span>

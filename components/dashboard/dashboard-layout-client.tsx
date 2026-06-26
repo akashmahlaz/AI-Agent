@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { LogOut, Settings, ChevronRight } from "lucide-react";
+import { LogOut, Settings, ChevronRight, FolderOpen } from "lucide-react";
 import {
   Tooltip,
   TooltipContent,
@@ -23,10 +23,11 @@ import {
   primaryDashboardSections,
   settingsDashboardSection,
 } from "@/components/dashboard/dashboard-sections";
-import { OperonMark } from "@/components/brand";
+import { OperonMark, OperonWordmark } from "@/components/brand";
 import { cn } from "@/lib/utils";
 import { useOperonSession } from "@/components/ui/session-provider";
 import { clearOperonSession } from "@/lib/operon-api";
+import { OpenChat } from "@lobehub/icons";
 
 interface DashboardLayoutClientProps {
   user?: { name?: string | null; email?: string | null; image?: string | null };
@@ -88,11 +89,11 @@ export function DashboardLayoutClient({
             )}
             aria-label={expanded ? "Collapse sidebar" : "Expand sidebar"}
           >
-            <OperonMark className="size-7 shrink-0" />
+            <FolderOpen height={28} />    
             {expanded && (
               <>
                 <span className="flex-1 text-left text-[15px] font-semibold tracking-tight text-foreground">
-                  Operon
+                  Bematterfull
                 </span>
                 <ChevronRight className="size-3.5 rotate-180 text-muted-foreground transition-transform duration-200" />
               </>

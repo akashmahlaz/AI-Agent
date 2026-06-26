@@ -1,0 +1,75 @@
+name: Deploy Backend (BeMatterfull API)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "server/**"
+      - ".github/workflows/deploy-backend.yml"
+
+concurrency:
+  group: deploy-backend
+  cancel-in-progress: true
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Create ECR repository if missing
+        run: |
+          aws ecr describe-repositories --repository-names bematterfull/backend \
+            --region ${{ secrets.AWS_REGION }} || \
+            aws ecr create-repository \
+              --repository-name bematterfull/backend \
+              --region ${{ secrets.AWS_REGION }}
+
+      - name: Login to ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build image
+        working-directory: server
+        run: |
+          docker build \
+            -f Dockerfile \
+            -t ${{ steps.login-ecr.outputs.registry }}/bematterfull/backend:${{ github.sha }} \
+            -t ${{ steps.login-ecr.outputs.registry }}/bematterfull/backend:latest \
+            .
+
+      - name: Push image
+        run: |
+          docker push ${{ steps.login-ecr.outputs.registry }}/bematterfull/backend:${{ github.sha }}
+          docker push ${{ steps.login-ecr.outputs.registry }}/bematterfull/backend:latest
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to EC2 via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.BACKEND_EC2_HOST }}
+          username: ${{ secrets.BACKEND_EC2_USER }}
+          key: ${{ secrets.BACKEND_EC2_SSH_KEY }}
+          command: |
+            set -e
+            aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | \
+              docker login --username AWS --password-stdin ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
+            docker pull ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/bematterfull/backend:latest
+            docker stop bematterfull-api || true
+            docker rm bematterfull-api || true
+            docker run -d --name bematterfull-api --restart unless-stopped \
+              -p 8080:8080 \
+              --env-file /opt/bematterfull/backend/.env.production \
+              ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/bematterfull/backend:latest
+            docker system prune -f

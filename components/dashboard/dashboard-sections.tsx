@@ -3,12 +3,14 @@ import {
   BarChart3,
   Bot,
   Calendar,
+  Cog,
   FileText,
   History,
   MessageSquare,
   Plug,
   ScrollText,
   Settings,
+  Globe,
   ShieldCheck,
   Sparkles,
   Wrench,
@@ -176,8 +178,8 @@ export const primaryDashboardSections = [
   },
   {
     id: "google",
-    icon: GoogleIcon,
-    label: "Google",
+    icon: Globe,
+    label: "Domians",
     href: "/dashboard/google",
     // Solid Google blue — the multicolor icon carries the brand identity.
     bg: "bg-[#4285F4]/8",
@@ -334,7 +336,7 @@ export const settingsTabs = [
 
 export const settingsDashboardSection: DashboardSection = {
   id: "settings",
-  icon: Settings,
+  icon: Cog,
   label: "Settings",
   href: "/dashboard/settings",
   bg: "bg-primary/8",

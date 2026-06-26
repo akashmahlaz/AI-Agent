@@ -1,0 +1,85 @@
+name: Deploy Frontend (BeMatterfull web)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "components/**"
+      - "lib/**"
+      - "hooks/**"
+      - "public/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "Dockerfile.frontend"
+      - "next.config.ts"
+      - "tailwind.config.*"
+      - "postcss.config.*"
+      - "components.json"
+      - ".github/workflows/deploy-frontend.yml"
+
+concurrency:
+  group: deploy-frontend
+  cancel-in-progress: true
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Create ECR repository if missing
+        run: |
+          aws ecr describe-repositories --repository-names bematterfull/frontend \
+            --region ${{ secrets.AWS_REGION }} || \
+            aws ecr create-repository \
+              --repository-name bematterfull/frontend \
+              --region ${{ secrets.AWS_REGION }}
+
+      - name: Login to ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build image
+        run: |
+          docker build \
+            -f Dockerfile.frontend \
+            -t ${{ steps.login-ecr.outputs.registry }}/bematterfull/frontend:${{ github.sha }} \
+            -t ${{ steps.login-ecr.outputs.registry }}/bematterfull/frontend:latest \
+            .
+
+      - name: Push image
+        run: |
+          docker push ${{ steps.login-ecr.outputs.registry }}/bematterfull/frontend:${{ github.sha }}
+          docker push ${{ steps.login-ecr.outputs.registry }}/bematterfull/frontend:latest
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to EC2 via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.FRONTEND_EC2_HOST }}
+          username: ${{ secrets.FRONTEND_EC2_USER }}
+          key: ${{ secrets.FRONTEND_EC2_SSH_KEY }}
+          command: |
+            set -e
+            aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | \
+              docker login --username AWS --password-stdin ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
+            docker pull ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/bematterfull/frontend:latest
+            docker stop bematterfull-web || true
+            docker rm bematterfull-web || true
+            docker run -d --name bematterfull-web --restart unless-stopped \
+              -p 3000:3000 \
+              --env-file /opt/bematterfull/frontend/.env.production \
+              ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/bematterfull/frontend:latest
+            docker system prune -f

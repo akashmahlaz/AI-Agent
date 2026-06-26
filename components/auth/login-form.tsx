@@ -47,7 +47,7 @@ export function LoginForm() {
   return (
     <div className="w-full max-w-100 rounded-2xl border border-white/60 bg-white/75 p-8 shadow-[0_8px_60px_rgba(0,0,0,0.04)] backdrop-blur-xl sm:p-10">
       <div className="mb-6 flex justify-center">
-        <OperonWordmark height={28} />
+        {/* <OperonWordmark height={28} /> */}
       </div>
       <div className="mb-8 text-center">
         <h1 className="font-heading text-[28px] font-extrabold tracking-tight text-gray-900 sm:text-[32px]">

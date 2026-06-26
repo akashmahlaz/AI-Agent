@@ -22,6 +22,7 @@ import {
   Send,
   Wifi,
   Settings2,
+  SearchCheck,
   QrCode,
   Power,
   X,
@@ -43,8 +44,11 @@ import {
   PenLine,
   GraduationCap,
   Coffee,
+  GlobeCheck,
   Mail,
   Upload,
+  ChartLine,
+  UserSearch,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -1702,9 +1706,9 @@ function ChatPage() {
                 {/* Suggestion chips */}
                 <div className="flex flex-wrap justify-center gap-2">
                   {[
-                    { icon: Code2, label: "Code" },
-                    { icon: PenLine, label: "Write" },
-                    { icon: GraduationCap, label: "Learn" },
+                    { icon: SearchCheck, label: "Verify Chain" },
+                    { icon: GlobeCheck, label: "Analyze Domain" },
+                    { icon: UserSearch, label: "Publishers" },
                     { icon: Coffee, label: "Life stuff" },
                     { icon: Mail, label: "From Gmail" },
                   ].map(({ icon: Icon, label }) => (
@@ -1713,12 +1717,12 @@ function ChatPage() {
                       type="button"
                       onClick={() =>
                         setInput(
-                          label === "Code"
-                            ? "Help me write code for "
-                            : label === "Write"
-                              ? "Write a "
-                              : label === "Learn"
-                                ? "Explain "
+                          label === "Verify Chain"
+                            ? "Verify ads chains for compliance and performance."
+                            : label === "Analyze Domain"
+                              ? "Analyze domain for insights."
+                              : label === "Publishers"
+                                ? "Check publishers for credibility."
                                 : label === "Life stuff"
                                   ? "Help me with "
                                   : "Summarise my last 5 emails",
@@ -1972,7 +1976,7 @@ function ChatPage() {
                   placeholder={
                     isChannelConversation
                       ? `Viewing ${CHANNEL_META[activeChannel]?.label} conversation`
-                      : "Message Operon..."
+                      : "Message ads chain verifier..."
                   }
                   className="flex-1"
                 />
