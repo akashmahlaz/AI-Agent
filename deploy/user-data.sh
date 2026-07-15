@@ -51,6 +51,14 @@ NEXT_PUBLIC_API_URL=http://localhost:8080
 NEXTAUTH_URL=http://localhost:3000
 NEXTAUTH_SECRET=matterfull-nextauth-secret-change-in-prod-2026
 MONGODB_URI=mongodb://localhost:27017/operon
+# Google OAuth (must match Google Cloud Console redirect URI)
+AUTH_GOOGLE_ID=YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com
+AUTH_GOOGLE_SECRET=YOUR_GOOGLE_CLIENT_SECRET
+
+# Microsoft OAuth
+MICROSOFT_ENTRA_ID_CLIENT_ID=YOUR_MICROSOFT_CLIENT_ID
+MICROSOFT_ENTRA_ID_CLIENT_SECRET=YOUR_MICROSOFT_CLIENT_SECRET
+MICROSOFT_ENTRA_ID_TENANT_ID=YOUR_MICROSOFT_TENANT_ID
 EOF
 
 # Configure Nginx
@@ -103,6 +111,39 @@ server {
     }
 
     # File uploads
+    client_max_body_size 50M;
+}
+
+# Ads subdomain - serve ads-manager branch or same app
+server {
+    listen 80;
+    server_name ads.punjabtechonline.com;
+
+    # Frontend (Next.js)
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_cache_bypass $http_upgrade;
+    }
+
+    # Backend API (Rust/Axum)
+    location /api/ {
+        proxy_pass http://127.0.0.1:8080/api/;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_cache_bypass $http_upgrade;
+        proxy_read_timeout 300s;
+    }
+
     client_max_body_size 50M;
 }
 NGINX
