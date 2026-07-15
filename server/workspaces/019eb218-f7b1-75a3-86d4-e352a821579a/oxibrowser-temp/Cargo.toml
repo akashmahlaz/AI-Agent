@@ -1,7 +1,0 @@
-[package]
-name = "oxibrowser-temp"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-oxibrowser = "0.15"
