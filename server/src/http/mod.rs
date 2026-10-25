@@ -57,6 +57,8 @@ pub fn router(state: AppState) -> Router {
         .route("/integrations/whatsapp/status", get(integrations::whatsapp_status))
         .route("/integrations/telegram/status", get(integrations::telegram_status))
         .route("/integrations/github/status", get(integrations::github_status))
+        .route("/integrations/github/token", post(integrations::github_connect_token))
+        .route("/integrations/github/disconnect", post(integrations::github_disconnect))
         .route("/integrations/whatsapp/onboarding", get(integrations::whatsapp_onboarding))
         .route("/integrations/whatsapp", post(integrations::whatsapp_action))
         .route("/logs", get(logs::list_logs).post(logs::append_log))

@@ -119,3 +119,117 @@ async fn fetch_github_login(state: &AppState, user_id: uuid::Uuid) -> AppResult<
         .and_then(|v| v.as_str())
         .map(str::to_owned))
 }
+
+#[derive(Deserialize)]
+pub struct ConnectTokenPayload {
+    pub token: String,
+}
+
+pub async fn github_connect_token(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<ConnectTokenPayload>,
+) -> AppResult<Json<serde_json::Value>> {
+    let token = super::token_from_request(&headers).ok_or(AppError::Unauthorized)?;
+    let user_id = super::decode_claims_public(&state, token)?;
+    let raw_token = payload.token.trim();
+    if raw_token.is_empty() {
+        return Err(AppError::BadRequest("Token cannot be empty".into()));
+    }
+
+    let http_client = reqwest::Client::new();
+    let resp = http_client
+        .get("https://api.github.com/user")
+        .header(reqwest::header::USER_AGENT, "operonx")
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+        .bearer_auth(raw_token)
+        .send()
+        .await
+        .map_err(|err| AppError::ServiceUnavailable(format!("GitHub API request failed: {err}")))?;
+
+    if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(AppError::BadRequest("Invalid GitHub token or token has expired".into()));
+    }
+    if !resp.status().is_success() {
+        return Err(AppError::ServiceUnavailable(format!(
+            "GitHub API responded with status {}",
+            resp.status()
+        )));
+    }
+
+    let scopes_header = resp
+        .headers()
+        .get("x-oauth-scopes")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("repo,read:user,user:email");
+    let scopes: Vec<String> = scopes_header
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|err| AppError::ServiceUnavailable(format!("Failed to parse GitHub profile: {err}")))?;
+
+    let account_id = body
+        .get("id")
+        .and_then(|v| v.as_i64().map(|n| n.to_string()).or_else(|| v.as_str().map(str::to_owned)))
+        .ok_or_else(|| AppError::Internal("Missing GitHub user ID".into()))?;
+    let login = body
+        .get("login")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let name = body.get("name").and_then(|v| v.as_str());
+
+    sqlx::query(
+        "insert into oauth_accounts (id, user_id, provider, provider_account_id, access_token_ciphertext, scopes)
+             values ($1, $2, 'github', $3, $4, $5)
+             on conflict (provider, provider_account_id) do update
+                 set user_id = excluded.user_id,
+                     access_token_ciphertext = excluded.access_token_ciphertext,
+                     scopes = excluded.scopes,
+                     updated_at = now()",
+    )
+    .bind(uuid::Uuid::now_v7())
+    .bind(user_id)
+    .bind(&account_id)
+    .bind(raw_token)
+    .bind(&scopes)
+    .execute(&state.db)
+    .await?;
+
+    if let Some(display_name) = name {
+        let _ = sqlx::query(
+            "update users set display_name = coalesce(display_name, $1), updated_at = now() where id = $2",
+        )
+        .bind(display_name)
+        .bind(user_id)
+        .execute(&state.db)
+        .await;
+    }
+
+    Ok(Json(json!({
+        "ok": true,
+        "connected": true,
+        "login": login,
+        "accountId": account_id
+    })))
+}
+
+pub async fn github_disconnect(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> AppResult<Json<serde_json::Value>> {
+    let token = super::token_from_request(&headers).ok_or(AppError::Unauthorized)?;
+    let user_id = super::decode_claims_public(&state, token)?;
+
+    sqlx::query("delete from oauth_accounts where user_id = $1 and provider = 'github'")
+        .bind(user_id)
+        .execute(&state.db)
+        .await?;
+
+    Ok(Json(json!({ "ok": true, "connected": false })))
+}
